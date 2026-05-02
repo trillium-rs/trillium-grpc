@@ -1,0 +1,82 @@
+[package]
+name = "trillium-grpc"
+version = "0.1.0"
+edition = "2024"
+description = "gRPC server and client for trillium, built on trillium-http's h2/h2c/h3 support"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jbr/trillium-grpc"
+
+[features]
+default = ["gzip"]
+json = ["dep:serde", "dep:serde_json"]
+gzip = ["dep:flate2"]
+deflate = ["dep:flate2"]
+zstd = ["dep:zstd"]
+codegen = [
+    "dep:protox",
+    "dep:prost-build",
+    "dep:prost-types",
+    "dep:proc-macro2",
+    "dep:quote",
+    "dep:syn",
+    "dep:prettyplease",
+]
+
+[[test]]
+name = "codegen"
+required-features = ["codegen"]
+
+[dependencies]
+trillium = "1.1.0"
+trillium-http = "1.2.0"
+trillium-client = "0.8.3"
+trillium-server-common = "0.7"
+prost = "0.14"
+bytes = "1"
+futures-lite = "2"
+thiserror = "2"
+pin-project-lite = "0.2"
+async-channel = "2"
+base64 = "0.22"
+
+serde = { version = "1", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
+
+flate2 = { version = "1", optional = true }
+zstd = { version = "0.13", optional = true }
+
+protox = { version = "0.9", optional = true }
+prost-build = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
+proc-macro2 = { version = "1", optional = true }
+quote = { version = "1", optional = true }
+syn = { version = "2", optional = true, features = ["full"] }
+prettyplease = { version = "0.2", optional = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+futures-lite = "2"
+trillium-tokio = "0.6.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-stream = "0.1"
+tonic = { version = "0.14", features = ["gzip"] }
+tonic-prost = "0.14"
+env_logger = "0.11"
+
+# Temporary: build against the h2-encoder branch for h2/h2c support that
+# isn't in the published 1.0.0-rc.1. Drop this block once h2 lands in a
+# released version. Pinned to a branch (not local path) so working in
+# ../trillium doesn't accidentally affect this repo.
+#
+# All trillium-* crates must share a single source — the runtime adapter
+# (trillium-tokio) and trillium-server-common own the connection-accept
+# loop where h2c preface-sniffing happens, so they need the patched
+# version too.
+# [patch.crates-io]
+# trillium = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }
+# trillium-http = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }
+# trillium-macros = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }
+# trillium-server-common = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }
+# trillium-tokio = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "codegen"]
+members = [".", "codegen", "macros"]
 
 [package]
 name = "trillium-grpc"
@@ -16,10 +16,15 @@ gzip = ["dep:flate2"]
 deflate = ["dep:flate2"]
 zstd = ["dep:zstd"]
 codegen = ["dep:trillium-grpc-codegen"]
+macros = ["dep:trillium-grpc-macros"]
 
 [[test]]
 name = "codegen"
 required-features = ["codegen"]
+
+[[test]]
+name = "macros"
+required-features = ["macros"]
 
 [dependencies]
 trillium = "1.1.0"
@@ -41,6 +46,7 @@ flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 
 trillium-grpc-codegen = { version = "0.1", path = "codegen", optional = true }
+trillium-grpc-macros = { version = "0.1", path = "macros", optional = true }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

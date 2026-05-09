@@ -12,6 +12,7 @@ const GENERATED_PATH: &str = "tests/generated/greeter_v1.rs";
 fn greeter_v1_matches_committed_output() {
     let opts = Options {
         include_paths: vec![PathBuf::from("tests/proto")],
+        ..Options::default()
     };
     let generated = generate_from_proto(
         &[PathBuf::from("tests/proto/greeter.proto")],

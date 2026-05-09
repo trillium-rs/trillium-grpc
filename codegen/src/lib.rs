@@ -39,15 +39,31 @@ pub enum Error {
     Syn(#[from] syn::Error),
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Options {
     /// Include paths handed to protox for resolving `import` statements.
     pub include_paths: Vec<PathBuf>,
+
+    /// Run the generated code through `prettyplease`. The CLI wants this
+    /// (output is committed and read by humans); the proc-macro path
+    /// re-tokenizes the result immediately and benefits nothing from
+    /// pretty-printing, so it sets this to `false`.
+    pub format: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            include_paths: Vec::new(),
+            format: true,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct GeneratedFiles {
-    /// Map of `<package>.rs` → file contents (formatted Rust).
+    /// Map of `<package>.rs` → file contents. Pretty-printed iff
+    /// [`Options::format`] was set (default: `true`).
     pub files: BTreeMap<PathBuf, String>,
 }
 
@@ -69,7 +85,7 @@ pub fn generate_from_proto<P: AsRef<Path>>(
 /// the caller has already produced descriptors via another tool.
 pub fn generate_from_descriptors(
     fds: FileDescriptorSet,
-    _opts: &Options,
+    opts: &Options,
 ) -> Result<GeneratedFiles, Error> {
     let mut config = Config::new();
     config.service_generator(Box::new(TrilliumServiceGenerator::default()));
@@ -89,8 +105,8 @@ pub fn generate_from_descriptors(
     for (module, code) in raw {
         let filename = module.to_file_name_or("_");
         let path = PathBuf::from(filename);
-        let formatted = format_rust(&code);
-        files.insert(path, formatted);
+        let body = if opts.format { format_rust(&code) } else { code };
+        files.insert(path, body);
     }
 
     Ok(GeneratedFiles { files })

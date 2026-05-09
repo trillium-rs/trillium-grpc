@@ -10,6 +10,9 @@ pub mod timeout;
 #[cfg(feature = "codegen")]
 pub use trillium_grpc_codegen as codegen;
 
+#[cfg(feature = "macros")]
+pub use trillium_grpc_macros::generate;
+
 pub use client::{Client, ResponseStream, ServiceClient, ServiceClientExt, with_service_prefix};
 pub use codec::{Codec, Prost};
 pub use encoding::Encoding;

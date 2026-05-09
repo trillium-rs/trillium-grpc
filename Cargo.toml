@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "codegen"]
+
 [package]
 name = "trillium-grpc"
 version = "0.1.0"
@@ -12,15 +15,7 @@ json = ["dep:serde", "dep:serde_json"]
 gzip = ["dep:flate2"]
 deflate = ["dep:flate2"]
 zstd = ["dep:zstd"]
-codegen = [
-    "dep:protox",
-    "dep:prost-build",
-    "dep:prost-types",
-    "dep:proc-macro2",
-    "dep:quote",
-    "dep:syn",
-    "dep:prettyplease",
-]
+codegen = ["dep:trillium-grpc-codegen"]
 
 [[test]]
 name = "codegen"
@@ -45,13 +40,7 @@ serde_json = { version = "1", optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 
-protox = { version = "0.9", optional = true }
-prost-build = { version = "0.14", optional = true }
-prost-types = { version = "0.14", optional = true }
-proc-macro2 = { version = "1", optional = true }
-quote = { version = "1", optional = true }
-syn = { version = "2", optional = true, features = ["full"] }
-prettyplease = { version = "0.2", optional = true }
+trillium-grpc-codegen = { version = "0.1", path = "codegen", optional = true }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

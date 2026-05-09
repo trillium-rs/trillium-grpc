@@ -8,7 +8,7 @@ pub mod status;
 pub mod timeout;
 
 #[cfg(feature = "codegen")]
-pub mod codegen;
+pub use trillium_grpc_codegen as codegen;
 
 pub use client::{Client, ResponseStream, ServiceClient, ServiceClientExt, with_service_prefix};
 pub use codec::{Codec, Prost};

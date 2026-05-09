@@ -1,0 +1,17 @@
+[package]
+name = "trillium-grpc-codegen"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust .proto → Rust codegen backend for trillium-grpc"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jbr/trillium-grpc"
+
+[dependencies]
+protox = "0.9"
+prost-build = "0.14"
+prost-types = "0.14"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+prettyplease = "0.2"
+thiserror = "2"

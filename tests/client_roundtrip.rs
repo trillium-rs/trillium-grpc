@@ -7,8 +7,10 @@
 mod greeter_v1;
 
 use crate::greeter_v1::{Greeter, GreeterClient, GreeterServer, HelloReply, HelloRequest};
-use futures_lite::{Stream, StreamExt, stream};
-use trillium_grpc::{BufferedRequestStream, Code, Encoding, Metadata, ServiceClientExt, Status};
+use futures_lite::{StreamExt, stream};
+use trillium_grpc::{
+    Channel, Code, Encoding, Metadata, RequestStream, ResponseSink, ServiceClientExt, Status,
+};
 
 struct MyGreeter;
 
@@ -34,18 +36,21 @@ impl Greeter for MyGreeter {
     async fn say_hello_stream(
         &self,
         req: HelloRequest,
-    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>, Status> {
-        let name = req.name;
-        Ok(stream::iter((1..=3).map(move |i| {
-            Ok(HelloReply {
-                message: format!("Hello {i}, {name}"),
-            })
-        })))
+        mut responses: ResponseSink<'_, HelloReply>,
+    ) -> Result<(), Status> {
+        for i in 1..=3 {
+            responses
+                .send(HelloReply {
+                    message: format!("Hello {i}, {}", req.name),
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     async fn say_hello_many(
         &self,
-        mut reqs: BufferedRequestStream<HelloRequest>,
+        mut reqs: RequestStream<'_, HelloRequest>,
     ) -> Result<HelloReply, Status> {
         let mut names = Vec::new();
         while let Some(req) = reqs.next().await {
@@ -58,16 +63,17 @@ impl Greeter for MyGreeter {
 
     async fn say_hello_chat(
         &self,
-        mut reqs: BufferedRequestStream<HelloRequest>,
-    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>, Status> {
-        let mut replies = Vec::new();
-        while let Some(req) = reqs.next().await {
+        mut channel: Channel<'_, HelloRequest, HelloReply>,
+    ) -> Result<(), Status> {
+        while let Some(req) = channel.recv().await {
             let req = req?;
-            replies.push(Ok(HelloReply {
-                message: format!("Hi back, {}", req.name),
-            }));
+            channel
+                .send(HelloReply {
+                    message: format!("Hi back, {}", req.name),
+                })
+                .await?;
         }
-        Ok(stream::iter(replies))
+        Ok(())
     }
 }
 

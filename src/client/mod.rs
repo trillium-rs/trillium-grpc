@@ -6,20 +6,6 @@ pub use dispatch::Client;
 pub use response_stream::ResponseStream;
 pub use service_client::{ServiceClient, ServiceClientExt};
 
-use crate::Status;
-
-/// Extract the gRPC status from a finished client conn. Looks at trailers
-/// first; falls back to response headers for trailers-only responses (where
-/// the server sent HEADERS+END_STREAM with no body).
-pub(crate) fn read_grpc_status(conn: &trillium_client::Conn) -> Result<(), Status> {
-    if let Some(trailers) = conn.response_trailers()
-        && trailers.get_str("grpc-status").is_some()
-    {
-        return Status::from_trailers(trailers);
-    }
-    Status::from_trailers(conn.response_headers())
-}
-
 /// Append a service-prefix segment to the client's base URL. Used by
 /// generated `From<trillium_client::Client>` impls so that each generated
 /// method only needs to specify its own RPC name as a relative path.

@@ -6,19 +6,21 @@
 //!   sees CANCELLED, because trillium-http currently does not flush the
 //!   response when shutdown is initiated mid-RPC (separate issue, will
 //!   surface as `Code::Cancelled` to the caller once fixed).
-//! - Server-streaming: the response stream ends cleanly mid-flight per
-//!   `Swansong::interrupt`'s stream semantics; peer sees a partial-but-OK
-//!   stream. (Documented trade-off in `Cancellation::wrap_stream`.)
+//! - Server-streaming: the user closure (which now drives writes directly
+//!   through `ResponseSink`) is dropped mid-flight on shutdown; the
+//!   framework writes `grpc-status: 1 (CANCELLED)` trailers. Peer either
+//!   sees CANCELLED as the terminal item or the stream is torn down before
+//!   the trailers arrive (still a trillium-http flush issue).
 
 #[path = "generated/greeter_v1.rs"]
 mod greeter_v1;
 
 use crate::greeter_v1::{Greeter, GreeterClient, GreeterServer, HelloReply, HelloRequest};
-use futures_lite::{Stream, StreamExt, stream};
+use futures_lite::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use trillium_grpc::{BufferedRequestStream, Status};
+use trillium_grpc::{Channel, RequestStream, ResponseSink, Status};
 
 /// Drop sentinel: when its containing future is dropped, the flag flips.
 /// Lets us assert that a long-running handler future was actually
@@ -54,20 +56,21 @@ impl Greeter for SleepyGreeter {
     async fn say_hello_stream(
         &self,
         _req: HelloRequest,
-    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>, Status>
-    {
-        Ok(stream::unfold(0usize, |i| async move {
+        mut responses: ResponseSink<'_, HelloReply>,
+    ) -> Result<(), Status> {
+        let mut i = 0usize;
+        loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            Some((
-                Ok(HelloReply { message: format!("msg {i}") }),
-                i + 1,
-            ))
-        }))
+            responses
+                .send(HelloReply { message: format!("msg {i}") })
+                .await?;
+            i += 1;
+        }
     }
 
     async fn say_hello_many(
         &self,
-        _reqs: BufferedRequestStream<HelloRequest>,
+        _reqs: RequestStream<'_, HelloRequest>,
     ) -> Result<HelloReply, Status> {
         std::future::pending::<()>().await;
         unreachable!()
@@ -75,13 +78,14 @@ impl Greeter for SleepyGreeter {
 
     async fn say_hello_chat(
         &self,
-        _reqs: BufferedRequestStream<HelloRequest>,
-    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>, Status>
-    {
-        Ok(stream::unfold((), |()| async move {
+        mut channel: Channel<'_, HelloRequest, HelloReply>,
+    ) -> Result<(), Status> {
+        loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            Some((Ok(HelloReply { message: "tick".into() }), ()))
-        }))
+            channel
+                .send(HelloReply { message: "tick".into() })
+                .await?;
+        }
     }
 }
 
@@ -168,16 +172,18 @@ async fn shutdown_ends_in_flight_server_stream() {
     let shutdown =
         tokio::spawn(async move { server.shut_down().await });
 
-    // Drain remaining items. Per `Swansong::interrupt`'s stream semantics,
-    // the response stream ends cleanly with `None`; peer sees OK trailers.
-    // We only assert: the stream terminates promptly (no infinite loop)
-    // and we don't see a CANCELLED error item.
+    // Drain remaining items. With the borrowed-primitive design the user's
+    // future is dropped on shutdown and the framework writes CANCELLED
+    // trailers; depending on whether trillium-http flushes them in time,
+    // the peer either sees `Code::Cancelled` as a terminal error item or
+    // the stream ends abruptly. Either is acceptable — the assertion is
+    // that the stream terminates promptly.
     let drain = async {
         let mut tail_ok = 0;
         while let Some(item) = stream.next().await {
             match item {
                 Ok(_) => tail_ok += 1,
-                Err(s) => panic!("unexpected error draining: {s:?}"),
+                Err(_) => break,
             }
         }
         tail_ok
@@ -191,8 +197,8 @@ async fn shutdown_ends_in_flight_server_stream() {
         .expect("shutdown did not complete")
         .unwrap();
 
-    // Sanity: a 30s/100ms-per-message stream cut by ~50ms of shutdown
-    // delay should not have produced anywhere near as many messages as
-    // the user fn would have produced unmolested.
+    // Sanity: a forever-stream cut by ~50ms of shutdown delay should not
+    // have produced anywhere near as many messages as the user fn would
+    // have produced unmolested.
     assert!(tail_ok < 50, "stream did not end promptly: {tail_ok} more after first");
 }

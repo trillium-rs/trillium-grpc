@@ -12,13 +12,16 @@
 //!
 //! Generated code uses unqualified type names (`Conn`, `Handler`, `Status`,
 //! …) and a `use` block at the top of each module to bring them into scope.
-//! Downstream crates only need to depend on `trillium-grpc` — `Stream` is
-//! re-exported there.
+//! Downstream crates only need to depend on `trillium-grpc` — `Stream`,
+//! `RequestStream`, `ResponseSink`, and `Channel` are all re-exported there.
 //!
-//! Streaming method return types use `+ use<Self>` precise-capture clauses so
-//! the inner `impl Stream` only "captures" the `Self` type parameter. Because
-//! the trait bound is `Send + Sync + 'static`, this is functionally equivalent
-//! to `+ use<>` (no captures), but rustc requires `Self` in the list.
+//! Streaming server-side trait methods take borrowed primitives
+//! (`RequestStream<'_, Req>`, `ResponseSink<'_, Resp>`, `Channel<'_, Req, Resp>`)
+//! whose lifetime is tied to the user closure. Returned streams have been
+//! removed from the server trait — responses are pushed through the sink
+//! and the framework writes `grpc-status` trailers based on the user's
+//! `Result`. The client-facing methods still expose `impl Stream`-based
+//! ergonomics on top of a spawned reader.
 
 use prost_build::{Config, Method, Module, Service, ServiceGenerator};
 use prost_types::FileDescriptorSet;
@@ -125,21 +128,36 @@ fn format_rust(src: &str) -> String {
 #[derive(Default)]
 struct TrilliumServiceGenerator {
     services_in_package: u32,
-    needs_stream: bool,
-    needs_buffered_request_stream: bool,
+    needs: Needs,
+}
+
+/// Which trillium-grpc types this package's generated code references.
+/// Drives the `use trillium_grpc::{...}` block at the top of the module.
+#[derive(Default)]
+struct Needs {
+    /// `impl Stream<...>` shows up in client-streaming/bidi client *inputs*
+    /// and server-streaming/bidi client *outputs*.
+    stream: bool,
+    /// `RequestStream<'_, Req>` — client-streaming server-side parameter.
+    request_stream: bool,
+    /// `ResponseSink<'_, Resp>` — server-streaming server-side parameter.
+    response_sink: bool,
+    /// `Channel<'_, Req, Resp>` — bidi server-side parameter.
+    channel: bool,
 }
 
 impl ServiceGenerator for TrilliumServiceGenerator {
     fn generate(&mut self, service: Service, buf: &mut String) {
         self.services_in_package += 1;
         for m in &service.methods {
-            // `Stream` shows up in both server-streaming server returns
-            // and client-streaming/bidi client method parameters.
             if m.server_streaming || m.client_streaming {
-                self.needs_stream = true;
+                self.needs.stream = true;
             }
-            if m.client_streaming {
-                self.needs_buffered_request_stream = true;
+            match (m.client_streaming, m.server_streaming) {
+                (false, true) => self.needs.response_sink = true,
+                (true, false) => self.needs.request_stream = true,
+                (true, true) => self.needs.channel = true,
+                (false, false) => {}
             }
         }
         let trait_def = render_trait(&service);
@@ -155,10 +173,7 @@ impl ServiceGenerator for TrilliumServiceGenerator {
 
     fn finalize_package(&mut self, _package: &str, buf: &mut String) {
         if self.services_in_package > 0 {
-            buf.insert_str(
-                0,
-                &render_imports(self.needs_stream, self.needs_buffered_request_stream),
-            );
+            buf.insert_str(0, &render_imports(&self.needs));
         }
         // Reset for the next package.
         *self = Self::default();
@@ -167,25 +182,38 @@ impl ServiceGenerator for TrilliumServiceGenerator {
 
 /// Build the `use` block prepended to a module that contains at least one
 /// generated service. `Future`/`Result`/`Send`/`Sync`/`Sized` are in the
-/// prelude and don't need importing; `Stream` and `BufferedRequestStream` are
-/// only emitted when the service actually uses them.
+/// prelude and don't need importing; streaming types are imported only when
+/// the service actually references them.
 ///
 /// Note: `Client` here is the trillium-grpc dispatch trait (in scope so
 /// `Prost::*_call` resolves through it); `trillium_client::Client` (the
 /// connection-pool struct) is referenced fully-qualified in generated
 /// types to avoid the name collision.
-fn render_imports(needs_stream: bool, needs_buffered_request_stream: bool) -> String {
-    let mut grpc_items: Vec<&str> = vec!["Client", "Prost", "Server", "ServiceClient", "Status"];
-    if needs_buffered_request_stream {
-        grpc_items.push("BufferedRequestStream");
+fn render_imports(needs: &Needs) -> String {
+    let mut grpc_items: Vec<&str> = vec![
+        "Client",
+        "Prost",
+        "Server",
+        "ServiceClient",
+        "Status",
+        "prepare_grpc_conn",
+    ];
+    if needs.request_stream {
+        grpc_items.push("RequestStream");
     }
-    if needs_stream {
+    if needs.response_sink {
+        grpc_items.push("ResponseSink");
+    }
+    if needs.channel {
+        grpc_items.push("Channel");
+    }
+    if needs.stream {
         grpc_items.push("Stream");
     }
     grpc_items.sort_unstable();
 
     format!(
-        "use std::sync::Arc;\nuse trillium::{{Conn, Handler, Method}};\nuse trillium_grpc::{{{}}};\n\n",
+        "use std::sync::Arc;\nuse trillium::{{Conn, Handler, Method, Upgrade}};\nuse trillium_grpc::{{{}}};\n\n",
         grpc_items.join(", ")
     )
 }
@@ -207,28 +235,36 @@ fn render_trait_method(method: &Method) -> proc_macro2::TokenStream {
     let input: syn::Type = syn::parse_str(&method.input_type).expect("valid Rust type from prost");
     let output: syn::Type = syn::parse_str(&method.output_type).expect("valid Rust type from prost");
 
-    let request_param = if method.client_streaming {
-        quote! { requests: BufferedRequestStream<#input> }
-    } else {
-        quote! { request: #input }
-    };
-
-    let result_ty = if method.server_streaming {
-        quote! {
-            Result<
-                impl Stream<Item = Result<#output, Status>> + Send + 'static + use<Self>,
-                Status,
-            >
-        }
-    } else {
-        quote! { Result<#output, Status> }
-    };
-
-    quote! {
-        fn #name(
-            &self,
-            #request_param,
-        ) -> impl Future<Output = #result_ty> + Send;
+    // For the four call shapes, generate trait signatures that match the
+    // borrowed-primitive dispatch shape: framework owns the upgrade and
+    // hands the user closure RequestStream/ResponseSink/Channel borrows
+    // tied to that lifetime.
+    match (method.client_streaming, method.server_streaming) {
+        (false, false) => quote! {
+            fn #name(
+                &self,
+                request: #input,
+            ) -> impl Future<Output = Result<#output, Status>> + Send;
+        },
+        (false, true) => quote! {
+            fn #name(
+                &self,
+                request: #input,
+                responses: ResponseSink<'_, #output>,
+            ) -> impl Future<Output = Result<(), Status>> + Send;
+        },
+        (true, false) => quote! {
+            fn #name(
+                &self,
+                requests: RequestStream<'_, #input>,
+            ) -> impl Future<Output = Result<#output, Status>> + Send;
+        },
+        (true, true) => quote! {
+            fn #name(
+                &self,
+                channel: Channel<'_, #input, #output>,
+            ) -> impl Future<Output = Result<(), Status>> + Send;
+        },
     }
 }
 
@@ -236,12 +272,26 @@ fn render_server(service: &Service) -> proc_macro2::TokenStream {
     use quote::{format_ident, quote};
     let trait_name = format_ident!("{}", service.name);
     let server_name = format_ident!("{}Server", service.name);
+    let dispatch_name = format_ident!("{}Dispatch", service.name);
     let prefix = if service.package.is_empty() {
         format!("/{}", service.proto_name)
     } else {
         format!("/{}.{}", service.package, service.proto_name)
     };
-    let arms = service.methods.iter().map(render_server_arm);
+
+    let dispatch_variants = service.methods.iter().map(|m| {
+        let v = format_ident!("{}", m.proto_name);
+        quote! { #v }
+    });
+    let dispatch_match_arms = service.methods.iter().map(|m| {
+        let path = format!("/{}", m.proto_name);
+        let v = format_ident!("{}", m.proto_name);
+        quote! { #path => #dispatch_name::#v, }
+    });
+    let upgrade_match_arms = service
+        .methods
+        .iter()
+        .map(|m| render_upgrade_arm(m, &dispatch_name));
 
     quote! {
         pub struct #server_name<T>(Arc<T>);
@@ -250,6 +300,11 @@ fn render_server(service: &Service) -> proc_macro2::TokenStream {
             pub fn new(inner: T) -> Self {
                 Self(Arc::new(inner))
             }
+        }
+
+        #[derive(Debug, Clone, Copy)]
+        enum #dispatch_name {
+            #(#dispatch_variants,)*
         }
 
         impl<T: #trait_name> Handler for #server_name<T> {
@@ -261,42 +316,68 @@ fn render_server(service: &Service) -> proc_macro2::TokenStream {
                 if conn.method() != Method::Post {
                     return conn;
                 }
-                match method {
-                    #(#arms)*
-                    _ => conn,
+                let dispatch = match method {
+                    #(#dispatch_match_arms)*
+                    _ => return conn,
+                };
+                let conn = match prepare_grpc_conn(conn, "proto") {
+                    Ok(c) => c,
+                    Err(c) => return c,
+                };
+                conn.with_state(dispatch).upgrade().halt()
+            }
+
+            fn has_upgrade(&self, upgrade: &Upgrade) -> bool {
+                upgrade.state().get::<#dispatch_name>().is_some()
+            }
+
+            async fn upgrade(&self, mut upgrade: Upgrade) {
+                let dispatch = upgrade.state_mut().take::<#dispatch_name>().unwrap();
+                let inner = Arc::clone(&self.0);
+                match dispatch {
+                    #(#upgrade_match_arms)*
                 }
             }
         }
     }
 }
 
-fn render_server_arm(method: &Method) -> proc_macro2::TokenStream {
+fn render_upgrade_arm(
+    method: &Method,
+    dispatch_name: &proc_macro2::Ident,
+) -> proc_macro2::TokenStream {
     use quote::{format_ident, quote};
-    let path = format!("/{}", method.proto_name);
+    let v = format_ident!("{}", method.proto_name);
     let rust_name = format_ident!("{}", method.name);
 
-    // Dispatch via the `Server` trait method on the codec type — no turbofish
-    // needed because all generic parameters are inferable from the closure
-    // and `conn`.
-    let dispatch_method = match (method.client_streaming, method.server_streaming) {
-        (false, false) => format_ident!("unary"),
-        (false, true) => format_ident!("server_streaming"),
-        (true, false) => format_ident!("client_streaming"),
-        (true, true) => format_ident!("bidi"),
-    };
-    let arg = if method.client_streaming {
-        format_ident!("reqs")
-    } else {
-        format_ident!("req")
+    // Closure shape mirrors the dispatch fn it's handed to. The streaming
+    // shapes use `async move |...|` (an async closure) rather than
+    // `move |...| async move {...}` because the latter doesn't infer a
+    // higher-ranked AsyncFnOnce bound over the borrowed primitive's
+    // lifetime — the returned future ends up tied to a specific lifetime,
+    // and dispatch needs `for<'a> AsyncFnOnce(...<'a>...)`.
+    let (dispatch_method, closure) = match (method.client_streaming, method.server_streaming) {
+        (false, false) => (
+            format_ident!("unary"),
+            quote! { async move |req| inner.#rust_name(req).await },
+        ),
+        (false, true) => (
+            format_ident!("server_streaming"),
+            quote! { async move |req, sink| inner.#rust_name(req, sink).await },
+        ),
+        (true, false) => (
+            format_ident!("client_streaming"),
+            quote! { async move |reqs| inner.#rust_name(reqs).await },
+        ),
+        (true, true) => (
+            format_ident!("bidi"),
+            quote! { async move |channel| inner.#rust_name(channel).await },
+        ),
     };
 
     quote! {
-        #path => {
-            let inner = Arc::clone(&self.0);
-            Prost::#dispatch_method(
-                conn,
-                move |#arg| async move { inner.#rust_name(#arg).await },
-            ).await
+        #dispatch_name::#v => {
+            Prost::#dispatch_method(upgrade, #closure).await
         }
     }
 }

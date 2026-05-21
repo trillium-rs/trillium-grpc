@@ -29,7 +29,7 @@ required-features = ["macros"]
 [dependencies]
 trillium = "1.1.0"
 trillium-http = "1.2.0"
-trillium-client = "0.8.3"
+trillium-client = "0.9"
 trillium-server-common = "0.7"
 prost = "0.14"
 bytes = "1"
@@ -38,6 +38,7 @@ thiserror = "2"
 pin-project-lite = "0.2"
 async-channel = "2"
 base64 = "0.22"
+log = "0.4"
 
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }

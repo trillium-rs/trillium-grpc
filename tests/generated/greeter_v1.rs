@@ -1,7 +1,8 @@
 use std::sync::Arc;
-use trillium::{Conn, Handler, Method};
+use trillium::{Conn, Handler, Method, Upgrade};
 use trillium_grpc::{
-    BufferedRequestStream, Client, Prost, Server, ServiceClient, Status, Stream,
+    Channel, Client, Prost, RequestStream, ResponseSink, Server, ServiceClient, Status,
+    Stream, prepare_grpc_conn,
 };
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HelloRequest {
@@ -21,31 +22,29 @@ pub trait Greeter: Send + Sync + 'static {
     fn say_hello_stream(
         &self,
         request: HelloRequest,
-    ) -> impl Future<
-        Output = Result<
-            impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<Self>,
-            Status,
-        >,
-    > + Send;
+        responses: ResponseSink<'_, HelloReply>,
+    ) -> impl Future<Output = Result<(), Status>> + Send;
     fn say_hello_many(
         &self,
-        requests: BufferedRequestStream<HelloRequest>,
+        requests: RequestStream<'_, HelloRequest>,
     ) -> impl Future<Output = Result<HelloReply, Status>> + Send;
     fn say_hello_chat(
         &self,
-        requests: BufferedRequestStream<HelloRequest>,
-    ) -> impl Future<
-        Output = Result<
-            impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<Self>,
-            Status,
-        >,
-    > + Send;
+        channel: Channel<'_, HelloRequest, HelloReply>,
+    ) -> impl Future<Output = Result<(), Status>> + Send;
 }
 pub struct GreeterServer<T>(Arc<T>);
 impl<T> GreeterServer<T> {
     pub fn new(inner: T) -> Self {
         Self(Arc::new(inner))
     }
+}
+#[derive(Debug, Clone, Copy)]
+enum GreeterDispatch {
+    SayHello,
+    SayHelloStream,
+    SayHelloMany,
+    SayHelloChat,
 }
 impl<T: Greeter> Handler for GreeterServer<T> {
     async fn run(&self, conn: Conn) -> Conn {
@@ -56,37 +55,50 @@ impl<T: Greeter> Handler for GreeterServer<T> {
         if conn.method() != Method::Post {
             return conn;
         }
-        match method {
-            "/SayHello" => {
-                let inner = Arc::clone(&self.0);
-                Prost::unary(conn, move |req| async move { inner.say_hello(req).await })
-                    .await
+        let dispatch = match method {
+            "/SayHello" => GreeterDispatch::SayHello,
+            "/SayHelloStream" => GreeterDispatch::SayHelloStream,
+            "/SayHelloMany" => GreeterDispatch::SayHelloMany,
+            "/SayHelloChat" => GreeterDispatch::SayHelloChat,
+            _ => return conn,
+        };
+        let conn = match prepare_grpc_conn(conn, "proto") {
+            Ok(c) => c,
+            Err(c) => return c,
+        };
+        conn.with_state(dispatch).upgrade().halt()
+    }
+    fn has_upgrade(&self, upgrade: &Upgrade) -> bool {
+        upgrade.state().get::<GreeterDispatch>().is_some()
+    }
+    async fn upgrade(&self, mut upgrade: Upgrade) {
+        let dispatch = upgrade.state_mut().take::<GreeterDispatch>().unwrap();
+        let inner = Arc::clone(&self.0);
+        match dispatch {
+            GreeterDispatch::SayHello => {
+                Prost::unary(upgrade, async move |req| inner.say_hello(req).await).await
             }
-            "/SayHelloStream" => {
-                let inner = Arc::clone(&self.0);
+            GreeterDispatch::SayHelloStream => {
                 Prost::server_streaming(
-                        conn,
-                        move |req| async move { inner.say_hello_stream(req).await },
+                        upgrade,
+                        async move |req, sink| inner.say_hello_stream(req, sink).await,
                     )
                     .await
             }
-            "/SayHelloMany" => {
-                let inner = Arc::clone(&self.0);
+            GreeterDispatch::SayHelloMany => {
                 Prost::client_streaming(
-                        conn,
-                        move |reqs| async move { inner.say_hello_many(reqs).await },
+                        upgrade,
+                        async move |reqs| inner.say_hello_many(reqs).await,
                     )
                     .await
             }
-            "/SayHelloChat" => {
-                let inner = Arc::clone(&self.0);
+            GreeterDispatch::SayHelloChat => {
                 Prost::bidi(
-                        conn,
-                        move |reqs| async move { inner.say_hello_chat(reqs).await },
+                        upgrade,
+                        async move |channel| inner.say_hello_chat(channel).await,
                     )
                     .await
             }
-            _ => conn,
         }
     }
 }

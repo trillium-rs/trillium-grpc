@@ -11,14 +11,14 @@
 mod greeter_v1;
 
 mod proto {
-    tonic::include_proto!("greeter.v1");
+    include!("proto/gen/greeter.v1.rs");
 }
 
 use crate::greeter_v1::{Greeter, GreeterClient, GreeterServer, HelloReply, HelloRequest};
 use crate::proto::greeter_client::GreeterClient as TonicGreeter;
-use futures_lite::{Stream, StreamExt, stream};
+use futures_lite::StreamExt;
 use std::time::Duration;
-use trillium_grpc::{BufferedRequestStream, Code, ServiceClientExt, Status};
+use trillium_grpc::{Channel, Code, RequestStream, ResponseSink, ServiceClientExt, Status};
 
 /// Greeter whose `say_hello` blocks for the duration encoded in
 /// `name = "sleep:<ms>"`. Other shapes return immediately so we can vary
@@ -46,30 +46,27 @@ impl Greeter for SlowGreeter {
     async fn say_hello_stream(
         &self,
         req: HelloRequest,
-    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>, Status>
-    {
+        mut responses: ResponseSink<'_, HelloReply>,
+    ) -> Result<(), Status> {
         // Per-message sleep before yielding, so a streaming response can
         // be cut by an in-flight deadline.
         let delay = parse_sleep(&req.name).unwrap_or_default();
-        Ok(stream::unfold(0usize, move |i| async move {
-            if i >= 5 {
-                return None;
-            }
+        for i in 0..5 {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
-            Some((
-                Ok(HelloReply {
+            responses
+                .send(HelloReply {
                     message: format!("msg {i}"),
-                }),
-                i + 1,
-            ))
-        }))
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     async fn say_hello_many(
         &self,
-        mut reqs: BufferedRequestStream<HelloRequest>,
+        mut reqs: RequestStream<'_, HelloRequest>,
     ) -> Result<HelloReply, Status> {
         let mut names = Vec::new();
         while let Some(req) = reqs.next().await {
@@ -82,16 +79,16 @@ impl Greeter for SlowGreeter {
 
     async fn say_hello_chat(
         &self,
-        mut reqs: BufferedRequestStream<HelloRequest>,
-    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>, Status>
-    {
-        let mut replies = Vec::new();
-        while let Some(req) = reqs.next().await {
-            replies.push(Ok(HelloReply {
-                message: req?.name,
-            }));
+        mut channel: Channel<'_, HelloRequest, HelloReply>,
+    ) -> Result<(), Status> {
+        while let Some(req) = channel.recv().await {
+            channel
+                .send(HelloReply {
+                    message: req?.name,
+                })
+                .await?;
         }
-        Ok(stream::iter(replies))
+        Ok(())
     }
 }
 

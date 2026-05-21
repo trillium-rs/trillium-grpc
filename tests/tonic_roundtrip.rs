@@ -19,8 +19,8 @@ mod greeter_v1;
 
 use crate::greeter_v1::{Greeter, GreeterServer, HelloReply, HelloRequest};
 use crate::proto::greeter_client::GreeterClient;
-use futures_lite::{Stream, StreamExt, stream};
-use trillium_grpc::{BufferedRequestStream, Status};
+use futures_lite::StreamExt;
+use trillium_grpc::{Channel, RequestStream, ResponseSink, Status};
 
 struct MyGreeter;
 
@@ -34,18 +34,21 @@ impl Greeter for MyGreeter {
     async fn say_hello_stream(
         &self,
         req: HelloRequest,
-    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>, Status> {
-        let name = req.name;
-        Ok(stream::iter((1..=3).map(move |i| {
-            Ok(HelloReply {
-                message: format!("Hello {i}, {name}"),
-            })
-        })))
+        mut responses: ResponseSink<'_, HelloReply>,
+    ) -> Result<(), Status> {
+        for i in 1..=3 {
+            responses
+                .send(HelloReply {
+                    message: format!("Hello {i}, {}", req.name),
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     async fn say_hello_many(
         &self,
-        mut reqs: BufferedRequestStream<HelloRequest>,
+        mut reqs: RequestStream<'_, HelloRequest>,
     ) -> Result<HelloReply, Status> {
         let mut names = Vec::new();
         while let Some(req) = reqs.next().await {
@@ -58,16 +61,17 @@ impl Greeter for MyGreeter {
 
     async fn say_hello_chat(
         &self,
-        mut reqs: BufferedRequestStream<HelloRequest>,
-    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>, Status> {
-        let mut replies = Vec::new();
-        while let Some(req) = reqs.next().await {
+        mut channel: Channel<'_, HelloRequest, HelloReply>,
+    ) -> Result<(), Status> {
+        while let Some(req) = channel.recv().await {
             let req = req?;
-            replies.push(Ok(HelloReply {
-                message: format!("Hi back, {}", req.name),
-            }));
+            channel
+                .send(HelloReply {
+                    message: format!("Hi back, {}", req.name),
+                })
+                .await?;
         }
-        Ok(stream::iter(replies))
+        Ok(())
     }
 }
 
@@ -237,4 +241,20 @@ async fn bidi_roundtrip_against_tonic_client() {
     );
 
     server.shut_down().await;
+}
+
+/// Regenerates the checked-in tonic fixture at `tests/proto/gen/greeter.v1.rs`
+/// from `tests/proto/greeter.proto`. This is committed (not built via build.rs)
+/// so downstream consumers don't pull in tonic-prost-build as a build-dependency.
+///
+/// Run after editing greeter.proto:
+///   cargo test --test tonic_roundtrip regenerate_tonic_fixture -- --ignored
+#[test]
+#[ignore = "regenerates a checked-in fixture; run manually after editing greeter.proto"]
+fn regenerate_tonic_fixture() {
+    tonic_prost_build::configure()
+        .build_server(false)
+        .out_dir("tests/proto/gen")
+        .compile_protos(&["tests/proto/greeter.proto"], &["tests/proto"])
+        .expect("failed to compile greeter.proto");
 }

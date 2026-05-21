@@ -1,4 +1,4 @@
-use crate::{Codec, Encoding, Status, client::read_grpc_status, frame::reader::MessageStream};
+use crate::{Codec, Encoding, Status, frame::reader::MessageStream};
 use async_channel::{Receiver, Sender, bounded};
 use futures_lite::{Stream, StreamExt};
 use std::{
@@ -7,12 +7,16 @@ use std::{
     task::{Context, Poll},
     time::Instant,
 };
+use trillium::Transport;
+use trillium_http::Upgrade as HttpUpgrade;
+
+type Upgrade = HttpUpgrade<Box<dyn Transport>>;
 use trillium_server_common::Runtime;
 
 /// Stream of decoded response messages from a server-streaming or bidi gRPC
 /// call. Backed by a task spawned on the underlying client's runtime: the
-/// task owns the `trillium_client::Conn`, reads framed messages from the
-/// response body, and yields a final error item if the trailing
+/// task owns the `trillium_http::Upgrade`, reads framed messages from the
+/// response side, and yields a final error item if the trailing
 /// `grpc-status` is non-Ok.
 ///
 /// Dropping the stream closes the channel, which the task observes on its
@@ -32,7 +36,7 @@ where
 {
     pub(crate) fn spawn(
         client: &trillium_client::Client,
-        conn: trillium_client::Conn,
+        upgrade: Upgrade,
         encoding: Encoding,
         deadline: Option<Instant>,
     ) -> Self {
@@ -40,8 +44,11 @@ where
         let runtime = client.connector().runtime();
         let _detach = runtime
             .clone()
-            .spawn(read_loop::<C, T>(conn, tx, encoding, runtime, deadline));
-        Self { rx: Box::pin(rx), _marker: PhantomData }
+            .spawn(read_loop::<C, T>(upgrade, tx, encoding, runtime, deadline));
+        Self {
+            rx: Box::pin(rx),
+            _marker: PhantomData,
+        }
     }
 
     /// Trailers-only stream: yields just the given error (or nothing if Ok)
@@ -52,12 +59,15 @@ where
         if let Err(status) = result {
             let _ = tx.try_send(Err(status));
         }
-        Self { rx: Box::pin(rx), _marker: PhantomData }
+        Self {
+            rx: Box::pin(rx),
+            _marker: PhantomData,
+        }
     }
 }
 
 async fn read_loop<C, T>(
-    mut conn: trillium_client::Conn,
+    mut upgrade: Upgrade,
     tx: Sender<Result<T, Status>>,
     encoding: Encoding,
     runtime: Runtime,
@@ -67,8 +77,8 @@ async fn read_loop<C, T>(
     T: Send + 'static,
 {
     {
-        let body = conn.response_body();
-        let mut messages = MessageStream::<C, T, _>::new(body).with_encoding(encoding);
+        let mut messages = MessageStream::<T, _>::new(&mut upgrade, <C as Codec<T>>::decode)
+            .with_encoding(encoding);
         loop {
             let next = match next_with_deadline(&runtime, deadline, messages.next()).await {
                 Ok(opt) => opt,
@@ -87,7 +97,9 @@ async fn read_loop<C, T>(
             }
         }
     }
-    if let Err(status) = read_grpc_status(&conn) {
+    if let Some(trailers) = upgrade.received_trailers()
+        && let Err(status) = Status::from_trailers(trailers)
+    {
         let _ = tx.send(Err(status)).await;
     }
 }

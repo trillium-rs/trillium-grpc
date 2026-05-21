@@ -18,5 +18,5 @@ pub use codec::{Codec, Prost};
 pub use encoding::Encoding;
 pub use futures_lite::Stream;
 pub use metadata::{Metadata, MetadataError, MetadataValue};
-pub use server::{BufferedRequestStream, Server};
+pub use server::{Channel, RequestStream, ResponseSink, Server, dispatch::prepare_grpc_conn};
 pub use status::{Code, Status};

@@ -21,28 +21,23 @@ impl Greeter for MyGreeter {
     async fn say_hello_stream(
         &self,
         _req: HelloRequest,
-    ) -> Result<
-        impl futures_lite::Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>,
-        Status,
-    > {
-        Ok(futures_lite::stream::empty())
+        _responses: trillium_grpc::ResponseSink<'_, HelloReply>,
+    ) -> Result<(), Status> {
+        Ok(())
     }
 
     async fn say_hello_many(
         &self,
-        _reqs: trillium_grpc::BufferedRequestStream<HelloRequest>,
+        _reqs: trillium_grpc::RequestStream<'_, HelloRequest>,
     ) -> Result<HelloReply, Status> {
         Ok(HelloReply::default())
     }
 
     async fn say_hello_chat(
         &self,
-        _reqs: trillium_grpc::BufferedRequestStream<HelloRequest>,
-    ) -> Result<
-        impl futures_lite::Stream<Item = Result<HelloReply, Status>> + Send + 'static + use<>,
-        Status,
-    > {
-        Ok(futures_lite::stream::empty())
+        _channel: trillium_grpc::Channel<'_, HelloRequest, HelloReply>,
+    ) -> Result<(), Status> {
+        Ok(())
     }
 }
 

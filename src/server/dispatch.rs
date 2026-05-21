@@ -1,231 +1,264 @@
 use crate::{
     Codec, Encoding, Status,
-    frame::{reader::MessageStream, writer::StreamBody},
-    server::content_type::{has_te_trailers, parse_grpc_content_type},
+    frame::{reader::MessageStream, writer::encode_frame},
+    server::{
+        content_type::{has_te_trailers, parse_grpc_content_type},
+        streaming::{Channel, RequestStream, ResponseSink},
+    },
     timeout::parse_grpc_timeout,
 };
-use futures_lite::{Stream, StreamExt, stream};
+use futures_lite::{AsyncWriteExt, StreamExt};
 use std::{future::Future, time::Instant};
-use trillium::{Body, Conn, Headers, KnownHeaderName, Status as HttpStatus, Swansong};
+use trillium::{Conn, Headers, KnownHeaderName, Status as HttpStatus, Swansong, Upgrade};
 use trillium_server_common::Runtime;
 
 /// Server-side dispatch methods, available on any codec type via a blanket
-/// impl. Generated code calls these as `Prost::unary(conn, ...)` etc., which
-/// resolves through the trait without requiring a turbofish.
+/// impl. Generated code calls these as `Prost::unary(upgrade, ...)` etc.,
+/// which resolves through the trait without requiring a turbofish.
 ///
-/// `async fn` is used in trait position so the method bodies stay readable;
-/// `Send`-ness of the returned future is inferred at the call site (where it
-/// matters — the trillium `Handler` requires its run future to be `Send`).
+/// Each method consumes a [`trillium::Upgrade`] (obtained via
+/// `conn.with_upgrade()` in the service `Handler::run` and then handed off in
+/// `Handler::upgrade`). The upgrade carries the AsyncRead+AsyncWrite transport,
+/// the request headers, and the eventual sink for `grpc-status` trailers.
+///
+/// For the streaming shapes, the framework retains ownership of the upgrade
+/// for the lifetime of the user closure and hands over borrowed
+/// [`RequestStream`] / [`ResponseSink`] / [`Channel`] primitives. On closure
+/// return the framework writes the terminating trailers based on the user's
+/// `Result`.
 #[allow(async_fn_in_trait)]
 pub trait Server: Sized + 'static {
     /// Unary RPC: read exactly one request, await the user function, emit one
-    /// response with `grpc-status` trailers.
+    /// response frame followed by `grpc-status` trailers.
     async fn unary<Req, Resp>(
-        conn: Conn,
+        upgrade: Upgrade,
         f: impl AsyncFnOnce(Req) -> Result<Resp, Status>,
-    ) -> Conn
-    where
+    ) where
         Self: Codec<Req> + Codec<Resp>,
         Req: Send + 'static,
         Resp: Send + 'static,
     {
-        unary_impl::<Self, Req, Resp>(conn, f).await
+        unary_impl::<Self, Req, Resp>(upgrade, f).await
     }
 
-    /// Server-streaming RPC: read one request, await the user function, then
-    /// frame each response message from the returned stream.
-    async fn server_streaming<Req, Resp, S>(
-        conn: Conn,
-        f: impl AsyncFnOnce(Req) -> Result<S, Status>,
-    ) -> Conn
-    where
+    /// Server-streaming RPC: read one request, hand the user a
+    /// [`ResponseSink`] for emitting response messages, write trailers based
+    /// on the user's `Result`.
+    async fn server_streaming<Req, Resp>(
+        upgrade: Upgrade,
+        f: impl AsyncFnOnce(Req, ResponseSink<'_, Resp>) -> Result<(), Status>,
+    ) where
         Self: Codec<Req> + Codec<Resp>,
         Req: Send + 'static,
         Resp: Send + 'static,
-        S: Stream<Item = Result<Resp, Status>> + Send + 'static,
     {
-        server_streaming_impl::<Self, Req, Resp, S>(conn, f).await
+        server_streaming_impl::<Self, Req, Resp>(upgrade, f).await
     }
 
-    /// Client-streaming RPC: hand the user a stream of decoded request
-    /// messages, await the single response.
+    /// Client-streaming RPC: hand the user a [`RequestStream`] of decoded
+    /// request messages, await the single response.
     async fn client_streaming<Req, Resp>(
-        conn: Conn,
-        f: impl AsyncFnOnce(BufferedRequestStream<Req>) -> Result<Resp, Status>,
-    ) -> Conn
-    where
+        upgrade: Upgrade,
+        f: impl AsyncFnOnce(RequestStream<'_, Req>) -> Result<Resp, Status>,
+    ) where
         Self: Codec<Req> + Codec<Resp>,
         Req: Send + 'static,
         Resp: Send + 'static,
     {
-        client_streaming_impl::<Self, Req, Resp>(conn, f).await
+        client_streaming_impl::<Self, Req, Resp>(upgrade, f).await
     }
 
-    /// Bidirectional-streaming RPC: hand the user a request stream, frame each
-    /// response message from the returned stream.
-    async fn bidi<Req, Resp, S>(
-        conn: Conn,
-        f: impl AsyncFnOnce(BufferedRequestStream<Req>) -> Result<S, Status>,
-    ) -> Conn
-    where
+    /// Bidirectional-streaming RPC: hand the user a [`Channel`] that
+    /// interleaves `recv` and `send`. Turn-taking by construction; spawn a
+    /// task if you need concurrent producers.
+    async fn bidi<Req, Resp>(
+        upgrade: Upgrade,
+        f: impl AsyncFnOnce(Channel<'_, Req, Resp>) -> Result<(), Status>,
+    ) where
         Self: Codec<Req> + Codec<Resp>,
         Req: Send + 'static,
         Resp: Send + 'static,
-        S: Stream<Item = Result<Resp, Status>> + Send + 'static,
     {
-        bidi_impl::<Self, Req, Resp, S>(conn, f).await
+        bidi_impl::<Self, Req, Resp>(upgrade, f).await
     }
 }
 
 impl<T: Sized + 'static> Server for T {}
 
 async fn unary_impl<C, Req, Resp>(
-    conn: Conn,
+    mut upgrade: Upgrade,
     f: impl AsyncFnOnce(Req) -> Result<Resp, Status>,
-) -> Conn
-where
+) where
     C: Codec<Req> + Codec<Resp>,
     Req: Send + 'static,
     Resp: Send + 'static,
 {
-    let mut conn = match check_preflight(conn) {
-        Ok(c) => c,
-        Err(c) => return c,
-    };
-    let encoding = match extract_request_encoding(&conn) {
+    let request_encoding = match extract_request_encoding(upgrade.request_headers()) {
         Ok(e) => e,
-        Err(status) => {
-            return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status)));
-        }
+        Err(status) => return trailers_only(upgrade, status).await,
     };
-    let cancellation = match Cancellation::from_conn(&conn) {
-        Ok(d) => d,
-        Err(status) => return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status))),
+    let cancellation = match Cancellation::from_upgrade(&upgrade) {
+        Ok(c) => c,
+        Err(status) => return trailers_only(upgrade, status).await,
     };
+    let response_encoding = negotiate_response_encoding(upgrade.request_headers());
 
-    let response = cancellation
+    let result = cancellation
         .race(async {
-            let req = read_one_request::<C, Req>(&mut conn, encoding).await?;
+            let req = read_one_request::<C, Req>(&mut upgrade, request_encoding).await?;
             f(req).await
         })
         .await;
-    respond_with_stream::<C, Resp, _>(conn, stream::once(response))
+
+    let trailers = match result {
+        Ok(resp) => match encode_frame::<C, Resp>(&resp, response_encoding) {
+            Ok(frame) => match upgrade.write_all(&frame).await {
+                Ok(()) => Status::ok().into_trailers(),
+                // Peer hung up. Nothing useful to do with trailers — drop.
+                Err(_) => return,
+            },
+            Err(status) => status.into_trailers(),
+        },
+        Err(status) => status.into_trailers(),
+    };
+
+    if let Err(e) = upgrade.send_trailers(trailers).await {
+        log::warn!("trillium-grpc: send_trailers failed: {e}");
+    }
 }
 
-async fn server_streaming_impl<C, Req, Resp, S>(
-    conn: Conn,
-    f: impl AsyncFnOnce(Req) -> Result<S, Status>,
-) -> Conn
-where
-    C: Codec<Req> + Codec<Resp>,
-    Req: Send + 'static,
-    Resp: Send + 'static,
-    S: Stream<Item = Result<Resp, Status>> + Send + 'static,
-{
-    let mut conn = match check_preflight(conn) {
-        Ok(c) => c,
-        Err(c) => return c,
-    };
-    let encoding = match extract_request_encoding(&conn) {
-        Ok(e) => e,
-        Err(status) => {
-            return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status)));
-        }
-    };
-    let cancellation = match Cancellation::from_conn(&conn) {
-        Ok(d) => d,
-        Err(status) => return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status))),
-    };
-
-    let response_stream = cancellation
-        .race(async {
-            let req = read_one_request::<C, Req>(&mut conn, encoding).await?;
-            f(req).await
-        })
-        .await;
-    let response_stream = match response_stream {
-        Ok(stream) => stream,
-        Err(status) => return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status))),
-    };
-
-    respond_with_stream::<C, Resp, _>(conn, cancellation.wrap_stream(response_stream))
+/// Send a status-only response: no frames, just `grpc-status` trailers.
+/// Used when we discover a gRPC-level error before reaching the user closure.
+async fn trailers_only(upgrade: Upgrade, status: Status) {
+    if let Err(e) = upgrade.send_trailers(status.into_trailers()).await {
+        log::warn!("trillium-grpc: send_trailers failed: {e}");
+    }
 }
 
-// Phase 3: the request body is read to completion *before* the user function
-// runs (buffered). This is a pragmatic limitation of the current trillium-http
-// body API — `Body::new_with_trailers` requires a `'static` body source, but
-// `ReceivedBody` borrows the `Conn`. A future `Body::new_duplex` extension on
-// trillium-http will unlock true streaming with no public-API change here.
 async fn client_streaming_impl<C, Req, Resp>(
-    conn: Conn,
-    f: impl AsyncFnOnce(BufferedRequestStream<Req>) -> Result<Resp, Status>,
-) -> Conn
-where
+    mut upgrade: Upgrade,
+    f: impl AsyncFnOnce(RequestStream<'_, Req>) -> Result<Resp, Status>,
+) where
     C: Codec<Req> + Codec<Resp>,
     Req: Send + 'static,
     Resp: Send + 'static,
 {
-    let mut conn = match check_preflight(conn) {
-        Ok(c) => c,
-        Err(c) => return c,
-    };
-    let encoding = match extract_request_encoding(&conn) {
+    let request_encoding = match extract_request_encoding(upgrade.request_headers()) {
         Ok(e) => e,
-        Err(status) => {
-            return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status)));
-        }
+        Err(status) => return trailers_only(upgrade, status).await,
     };
-    let cancellation = match Cancellation::from_conn(&conn) {
-        Ok(d) => d,
-        Err(status) => return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status))),
+    let cancellation = match Cancellation::from_upgrade(&upgrade) {
+        Ok(c) => c,
+        Err(status) => return trailers_only(upgrade, status).await,
     };
+    let response_encoding = negotiate_response_encoding(upgrade.request_headers());
 
-    let response = cancellation
+    let result = cancellation
         .race(async {
-            let requests = read_all_requests::<C, Req>(&mut conn, encoding).await;
-            f(BufferedRequestStream::new(requests)).await
+            let requests = RequestStream::new(
+                &mut upgrade,
+                <C as Codec<Req>>::decode,
+                request_encoding,
+            );
+            f(requests).await
         })
         .await;
-    respond_with_stream::<C, Resp, _>(conn, stream::once(response))
+
+    let trailers = match result {
+        Ok(resp) => match encode_frame::<C, Resp>(&resp, response_encoding) {
+            Ok(frame) => match upgrade.write_all(&frame).await {
+                Ok(()) => Status::ok().into_trailers(),
+                Err(_) => return,
+            },
+            Err(status) => status.into_trailers(),
+        },
+        Err(status) => status.into_trailers(),
+    };
+
+    if let Err(e) = upgrade.send_trailers(trailers).await {
+        log::warn!("trillium-grpc: send_trailers failed: {e}");
+    }
 }
 
-async fn bidi_impl<C, Req, Resp, S>(
-    conn: Conn,
-    f: impl AsyncFnOnce(BufferedRequestStream<Req>) -> Result<S, Status>,
-) -> Conn
-where
+async fn bidi_impl<C, Req, Resp>(
+    mut upgrade: Upgrade,
+    f: impl AsyncFnOnce(Channel<'_, Req, Resp>) -> Result<(), Status>,
+) where
     C: Codec<Req> + Codec<Resp>,
     Req: Send + 'static,
     Resp: Send + 'static,
-    S: Stream<Item = Result<Resp, Status>> + Send + 'static,
 {
-    let mut conn = match check_preflight(conn) {
-        Ok(c) => c,
-        Err(c) => return c,
-    };
-    let encoding = match extract_request_encoding(&conn) {
+    let request_encoding = match extract_request_encoding(upgrade.request_headers()) {
         Ok(e) => e,
-        Err(status) => {
-            return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status)));
-        }
+        Err(status) => return trailers_only(upgrade, status).await,
     };
-    let cancellation = match Cancellation::from_conn(&conn) {
-        Ok(d) => d,
-        Err(status) => return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status))),
+    let cancellation = match Cancellation::from_upgrade(&upgrade) {
+        Ok(c) => c,
+        Err(status) => return trailers_only(upgrade, status).await,
     };
+    let response_encoding = negotiate_response_encoding(upgrade.request_headers());
 
-    let response_stream = cancellation
+    let result = cancellation
         .race(async {
-            let requests = read_all_requests::<C, Req>(&mut conn, encoding).await;
-            f(BufferedRequestStream::new(requests)).await
+            let channel = Channel::new(
+                &mut upgrade,
+                <C as Codec<Req>>::decode,
+                <C as Codec<Resp>>::encode,
+                request_encoding,
+                response_encoding,
+            );
+            f(channel).await
         })
         .await;
-    let response_stream = match response_stream {
-        Ok(stream) => stream,
-        Err(status) => return respond_with_stream::<C, Resp, _>(conn, stream::once(Err(status))),
+
+    let trailers = match result {
+        Ok(()) => Status::ok().into_trailers(),
+        Err(status) => status.into_trailers(),
     };
 
-    respond_with_stream::<C, Resp, _>(conn, cancellation.wrap_stream(response_stream))
+    if let Err(e) = upgrade.send_trailers(trailers).await {
+        log::warn!("trillium-grpc: send_trailers failed: {e}");
+    }
+}
+
+async fn server_streaming_impl<C, Req, Resp>(
+    mut upgrade: Upgrade,
+    f: impl AsyncFnOnce(Req, ResponseSink<'_, Resp>) -> Result<(), Status>,
+) where
+    C: Codec<Req> + Codec<Resp>,
+    Req: Send + 'static,
+    Resp: Send + 'static,
+{
+    let request_encoding = match extract_request_encoding(upgrade.request_headers()) {
+        Ok(e) => e,
+        Err(status) => return trailers_only(upgrade, status).await,
+    };
+    let cancellation = match Cancellation::from_upgrade(&upgrade) {
+        Ok(c) => c,
+        Err(status) => return trailers_only(upgrade, status).await,
+    };
+    let response_encoding = negotiate_response_encoding(upgrade.request_headers());
+
+    let result = cancellation
+        .race(async {
+            let req = read_one_request::<C, Req>(&mut upgrade, request_encoding).await?;
+            let sink = ResponseSink::new(
+                &mut upgrade,
+                <C as Codec<Resp>>::encode,
+                response_encoding,
+            );
+            f(req, sink).await
+        })
+        .await;
+
+    let trailers = match result {
+        Ok(()) => Status::ok().into_trailers(),
+        Err(status) => status.into_trailers(),
+    };
+
+    if let Err(e) = upgrade.send_trailers(trailers).await {
+        log::warn!("trillium-grpc: send_trailers failed: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -287,50 +320,37 @@ mod tests {
     }
 }
 
-/// A buffered stream of decoded request messages handed to client-streaming /
-/// bidi user closures. Backed by a `Vec` for now; will be swappable for a
-/// true streaming reader once `trillium-http` exposes a duplex body API.
-pub struct BufferedRequestStream<T> {
-    items: std::vec::IntoIter<Result<T, Status>>,
-}
-
-impl<T> BufferedRequestStream<T> {
-    fn new(items: Vec<Result<T, Status>>) -> Self {
-        Self {
-            items: items.into_iter(),
-        }
-    }
-}
-
-impl<T: Unpin> Stream for BufferedRequestStream<T> {
-    type Item = Result<T, Status>;
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::task::Poll::Ready(self.items.next())
-    }
-}
-
-/// Validate request preflight (content-type, te:trailers) on a fresh request.
-/// Returns `Ok(conn)` when the request is well-formed, `Err(conn)` when the
-/// caller should return immediately (the conn carries the appropriate HTTP
-/// error status).
-fn check_preflight(conn: Conn) -> Result<Conn, Conn> {
+/// Validate request preflight (content-type, te:trailers) and set the gRPC
+/// response headers (content-type, grpc-accept-encoding). Returns the conn
+/// ready to be marked for upgrade, or an error-shaped conn if preflight failed.
+///
+/// Called from generated `Handler::run` *after* path matching has confirmed
+/// this request belongs to the service.
+pub fn prepare_grpc_conn(conn: Conn, codec_suffix: &str) -> Result<Conn, Conn> {
     if !has_grpc_content_type(&conn) {
         return Err(conn.with_status(HttpStatus::UnsupportedMediaType).halt());
     }
     if !has_te_trailers(conn.request_headers()) {
         return Err(conn.with_status(HttpStatus::BadRequest).halt());
     }
-    Ok(conn)
+    let content_type = format!("application/grpc+{codec_suffix}");
+    let response_encoding = negotiate_response_encoding(conn.request_headers());
+    let conn = conn
+        .with_response_header(KnownHeaderName::ContentType, content_type)
+        .with_response_header("grpc-accept-encoding", Encoding::accepted_encodings())
+        .with_status(HttpStatus::Ok);
+    Ok(if matches!(response_encoding, Encoding::Identity) {
+        conn
+    } else {
+        conn.with_response_header("grpc-encoding", response_encoding.as_grpc_encoding())
+    })
 }
 
 /// Resolve the inbound message encoding from `grpc-encoding`. Missing →
 /// `Identity` (per spec). Unknown → `Unimplemented` so the client can pick
 /// a different codec from `grpc-accept-encoding`.
-fn extract_request_encoding(conn: &Conn) -> Result<Encoding, Status> {
-    match conn.request_headers().get_str("grpc-encoding") {
+fn extract_request_encoding(request_headers: &Headers) -> Result<Encoding, Status> {
+    match request_headers.get_str("grpc-encoding") {
         None => Ok(Encoding::Identity),
         Some(s) => Encoding::from_grpc_encoding(s).ok_or_else(|| {
             Status::unimplemented(format!(
@@ -348,13 +368,16 @@ fn has_grpc_content_type(conn: &Conn) -> bool {
         .is_some()
 }
 
-async fn read_one_request<C, Req>(conn: &mut Conn, encoding: Encoding) -> Result<Req, Status>
+async fn read_one_request<C, Req>(
+    upgrade: &mut Upgrade,
+    encoding: Encoding,
+) -> Result<Req, Status>
 where
     C: Codec<Req>,
     Req: Send + 'static,
 {
-    let body = conn.request_body();
-    let mut stream = MessageStream::<C, Req, _>::new(body).with_encoding(encoding);
+    let mut stream = MessageStream::<Req, _>::new(upgrade, <C as Codec<Req>>::decode)
+        .with_encoding(encoding);
     match stream.next().await {
         Some(Ok(req)) => Ok(req),
         Some(Err(status)) => Err(status),
@@ -362,62 +385,16 @@ where
     }
 }
 
-async fn read_all_requests<C, Req>(
-    conn: &mut Conn,
-    encoding: Encoding,
-) -> Vec<Result<Req, Status>>
-where
-    C: Codec<Req>,
-    Req: Send + 'static,
-{
-    let body = conn.request_body();
-    let mut stream = MessageStream::<C, Req, _>::new(body).with_encoding(encoding);
-    let mut out = Vec::new();
-    while let Some(item) = stream.next().await {
-        let stop = item.is_err();
-        out.push(item);
-        if stop {
-            break;
-        }
-    }
-    out
-}
-
-fn respond_with_stream<C, Resp, S>(conn: Conn, stream: S) -> Conn
-where
-    C: Codec<Resp>,
-    Resp: Send + 'static,
-    S: Stream<Item = Result<Resp, Status>> + Send + 'static,
-{
-    let response_encoding = negotiate_response_encoding(conn.request_headers());
-    let suffix = <C as Codec<Resp>>::content_type_suffix();
-    let content_type = format!("application/grpc+{suffix}");
-    let body = Body::new_with_trailers(
-        StreamBody::<C, Resp, _>::new(stream).with_encoding(response_encoding),
-        None,
-    );
-    let mut conn = conn
-        .with_response_header(KnownHeaderName::ContentType, content_type)
-        .with_response_header("grpc-accept-encoding", Encoding::accepted_encodings())
-        .with_status(HttpStatus::Ok)
-        .with_body(body);
-    if !matches!(response_encoding, Encoding::Identity) {
-        conn.response_headers_mut()
-            .insert("grpc-encoding", response_encoding.as_grpc_encoding());
-    }
-    conn.halt()
-}
-
 /// Per-request cancellation handle. Combines two signals:
 ///
-/// 1. Connection-level shutdown via `conn.swansong()` — fires on http
+/// 1. Connection-level shutdown via `Upgrade::swansong()` — fires on http
 ///    server shutdown or h2/h3 connection teardown. Surfaces as
 ///    `Status::cancelled`.
 /// 2. Optional deadline parsed from the `grpc-timeout` header. Surfaces
 ///    as `Status::deadline_exceeded`.
 ///
-/// Every awaitable in the dispatch pipeline (request read, user closure,
-/// each response-stream item) is raced against both.
+/// The whole user closure is raced against both — including the user's
+/// streaming awaits inside `RequestStream::next` / `Channel::recv` etc.
 struct Cancellation {
     swansong: Swansong,
     deadline: Option<Deadline>,
@@ -430,19 +407,20 @@ struct Deadline {
 }
 
 impl Cancellation {
-    /// Capture the conn's swansong; if `grpc-timeout` is present, parse it
+    /// Capture the upgrade's swansong; if `grpc-timeout` is present, parse it
     /// and pair with a runtime handle. Errors only when the header is
     /// malformed (returned as `INVALID_ARGUMENT` to the caller).
-    fn from_conn(conn: &Conn) -> Result<Self, Status> {
-        let swansong = conn.swansong();
-        let deadline = match conn.request_headers().get_str("grpc-timeout") {
+    fn from_upgrade(upgrade: &Upgrade) -> Result<Self, Status> {
+        let swansong = upgrade.swansong();
+        let deadline = match upgrade.request_headers().get_str("grpc-timeout") {
             None => None,
             Some(header) => {
                 let duration = parse_grpc_timeout(header).ok_or_else(|| {
                     Status::invalid_argument(format!("malformed grpc-timeout {header:?}"))
                 })?;
-                let runtime = conn
-                    .shared_state::<Runtime>()
+                let runtime = upgrade
+                    .shared_state()
+                    .get::<Runtime>()
                     .expect("trillium-grpc requires a Runtime in shared state")
                     .clone();
                 Some(Deadline {
@@ -455,10 +433,6 @@ impl Cancellation {
     }
 
     /// Race a future against shutdown and (optionally) the deadline.
-    /// `Swansong::interrupt` handles the shutdown leg; we layer a deadline
-    /// timer on top via `futures_lite::future::or` (rather than
-    /// `Runtime::timeout`, which requires `Fut: Send` — dispatch is
-    /// intentionally agnostic to the user closure's `Send`-ness).
     async fn race<T, F>(&self, fut: F) -> Result<T, Status>
     where
         F: Future<Output = Result<T, Status>>,
@@ -481,56 +455,6 @@ impl Cancellation {
             Err(Status::deadline_exceeded("deadline elapsed"))
         };
         futures_lite::future::or(interruptible, timer).await
-    }
-
-    /// Wrap a response stream so each `next()` poll is bounded by the
-    /// deadline (yielding a terminal `Err(DEADLINE_EXCEEDED)` on expiry)
-    /// and by shutdown (cleanly ending the stream via
-    /// `Swansong::interrupt`).
-    ///
-    /// Note: shutdown-cut streams end with `Poll::Ready(None)`, which
-    /// [`StreamBody`](crate::frame::writer::StreamBody) encodes as
-    /// `grpc-status: 0`. Peers see a partial-but-OK stream rather than
-    /// `CANCELLED`. Adequate for graceful shutdown; revisit if we need
-    /// strict CANCELLED semantics.
-    fn wrap_stream<Resp, S>(
-        &self,
-        stream: S,
-    ) -> impl Stream<Item = Result<Resp, Status>> + Send + 'static
-    where
-        S: Stream<Item = Result<Resp, Status>> + Send + 'static,
-        Resp: Send + 'static,
-    {
-        let deadline = self.deadline.clone();
-        let with_deadline = stream::unfold(
-            (Box::pin(stream), deadline, false),
-            |(mut stream, deadline, expired)| async move {
-                if expired {
-                    return None;
-                }
-                match deadline.as_ref() {
-                    None => stream
-                        .next()
-                        .await
-                        .map(|item| (item, (stream, deadline, false))),
-                    Some(d) => match d.instant.checked_duration_since(Instant::now()) {
-                        None => Some((
-                            Err(Status::deadline_exceeded("deadline elapsed")),
-                            (stream, deadline, true),
-                        )),
-                        Some(remaining) => match d.runtime.timeout(remaining, stream.next()).await {
-                            Some(Some(item)) => Some((item, (stream, deadline, false))),
-                            Some(None) => None,
-                            None => Some((
-                                Err(Status::deadline_exceeded("deadline elapsed")),
-                                (stream, deadline, true),
-                            )),
-                        },
-                    },
-                }
-            },
-        );
-        self.swansong.interrupt(with_deadline)
     }
 }
 

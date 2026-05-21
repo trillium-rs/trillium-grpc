@@ -1,18 +1,17 @@
 use crate::{
     Code, Codec, Encoding, Status,
-    client::{ResponseStream, read_grpc_status, response_stream::race_against_deadline},
-    frame::{
-        reader::MessageStream,
-        writer::{StreamBody, encode_frame},
-    },
+    client::{ResponseStream, response_stream::race_against_deadline},
+    frame::{reader::MessageStream, writer::encode_frame},
     server::content_type::parse_grpc_content_type,
     timeout::parse_grpc_timeout,
 };
-use futures_lite::{Stream, StreamExt};
+use futures_lite::{AsyncWriteExt, Stream, StreamExt};
 use std::time::Instant;
-use trillium::{Body, KnownHeaderName};
-use trillium_client::{Conn, Version};
-use trillium_http::Status as HttpStatus;
+use trillium::{KnownHeaderName, Transport};
+use trillium_client::{Conn, ConnExt, Version};
+use trillium_http::{Status as HttpStatus, Upgrade as HttpUpgrade};
+
+type Upgrade = HttpUpgrade<Box<dyn Transport>>;
 
 /// Client-side dispatch methods, available on any codec type via a blanket
 /// impl. Generated code calls these as `Prost::unary_call(client, path, req)`
@@ -35,12 +34,11 @@ pub trait Client: Sized + 'static {
         Resp: Send + 'static,
     {
         let deadline = deadline_from_client(client);
-        with_deadline(client, deadline, async {
-            let conn = build_unary_conn::<Self, Req>(client, path, &req)?
-                .await
-                .map_err(transport_error)?;
-            read_single_response::<Self, Resp>(conn).await
-        })
+        with_deadline(
+            client,
+            deadline,
+            unary_call_impl::<Self, Req, Resp>(client, path, req),
+        )
         .await
     }
 
@@ -56,12 +54,11 @@ pub trait Client: Sized + 'static {
         Resp: Send + 'static,
     {
         let deadline = deadline_from_client(client);
-        with_deadline(client, deadline, async {
-            let conn = build_unary_conn::<Self, Req>(client, path, &req)?
-                .await
-                .map_err(transport_error)?;
-            read_streaming_response::<Self, Resp>(client, conn, deadline)
-        })
+        with_deadline(
+            client,
+            deadline,
+            server_streaming_call_impl::<Self, Req, Resp>(client, path, req, deadline),
+        )
         .await
     }
 
@@ -78,19 +75,19 @@ pub trait Client: Sized + 'static {
         S: Stream<Item = Req> + Send + 'static,
     {
         let deadline = deadline_from_client(client);
-        with_deadline(client, deadline, async {
-            let conn = build_streaming_conn::<Self, Req, S>(client, path, requests)
-                .await
-                .map_err(transport_error)?;
-            read_single_response::<Self, Resp>(conn).await
-        })
+        with_deadline(
+            client,
+            deadline,
+            client_streaming_call_impl::<Self, Req, Resp, S>(client, path, requests),
+        )
         .await
     }
 
     /// Bidirectional-streaming RPC: send a stream of requests, return a
-    /// stream of responses. Both halves are duplexed concurrently — the
-    /// request body is pulled by trillium-http's writer task while the
-    /// response stream is pulled by the consumer.
+    /// stream of responses.
+    ///
+    /// Currently the request stream is fully drained before the response
+    /// stream begins. True concurrent duplex on the client is a follow-up.
     async fn bidi_call<Req, Resp, S>(
         client: &trillium_client::Client,
         path: &str,
@@ -103,89 +100,239 @@ pub trait Client: Sized + 'static {
         S: Stream<Item = Req> + Send + 'static,
     {
         let deadline = deadline_from_client(client);
-        with_deadline(client, deadline, async {
-            let conn = build_streaming_conn::<Self, Req, S>(client, path, requests)
-                .await
-                .map_err(transport_error)?;
-            read_streaming_response::<Self, Resp>(client, conn, deadline)
-        })
+        with_deadline(
+            client,
+            deadline,
+            bidi_call_impl::<Self, Req, Resp, S>(client, path, requests, deadline),
+        )
         .await
     }
 }
 
 impl<T: Sized + 'static> Client for T {}
 
-/// Read exactly one response message and validate trailers. Used by unary
-/// and client-streaming, which both expect a single response.
-async fn read_single_response<C, Resp>(mut conn: Conn) -> Result<Resp, Status>
+async fn unary_call_impl<C, Req, Resp>(
+    client: &trillium_client::Client,
+    path: &str,
+    req: Req,
+) -> Result<Resp, Status>
+where
+    C: Codec<Req> + Codec<Resp>,
+    Req: Send + 'static,
+    Resp: Send + 'static,
+{
+    let outbound_encoding = outbound_encoding_from_client(client);
+    let frame = encode_frame::<C, Req>(&req, outbound_encoding)?;
+    let (mut upgrade, response_encoding) = open_upgrade::<C, Req>(client, path)
+        .await?
+        .into_streaming()?;
+
+    write_frame(&mut upgrade, &frame).await?;
+    close_outbound(&mut upgrade).await?;
+
+    let response = read_one_response::<C, Resp>(&mut upgrade, response_encoding).await?;
+    finish_with_trailers(&upgrade)?;
+    Ok(response)
+}
+
+async fn server_streaming_call_impl<C, Req, Resp>(
+    client: &trillium_client::Client,
+    path: &str,
+    req: Req,
+    deadline: Option<Instant>,
+) -> Result<ResponseStream<C, Resp>, Status>
+where
+    C: Codec<Req> + Codec<Resp>,
+    Req: Send + 'static,
+    Resp: Send + 'static,
+{
+    let outbound_encoding = outbound_encoding_from_client(client);
+    let frame = encode_frame::<C, Req>(&req, outbound_encoding)?;
+    let opened = open_upgrade::<C, Req>(client, path).await?;
+    let response_stream = match opened {
+        OpenUpgrade::Streaming(mut upgrade, response_encoding) => {
+            write_frame(&mut upgrade, &frame).await?;
+            close_outbound(&mut upgrade).await?;
+            ResponseStream::spawn(client, upgrade, response_encoding, deadline)
+        }
+        OpenUpgrade::TrailersOnly(result) => ResponseStream::trailers_only(result),
+    };
+    Ok(response_stream)
+}
+
+async fn client_streaming_call_impl<C, Req, Resp, S>(
+    client: &trillium_client::Client,
+    path: &str,
+    requests: S,
+) -> Result<Resp, Status>
+where
+    C: Codec<Req> + Codec<Resp>,
+    Req: Send + 'static,
+    Resp: Send + 'static,
+    S: Stream<Item = Req> + Send + 'static,
+{
+    let outbound_encoding = outbound_encoding_from_client(client);
+    let (mut upgrade, response_encoding) = open_upgrade::<C, Req>(client, path)
+        .await?
+        .into_streaming()?;
+
+    write_request_stream::<C, Req, S>(&mut upgrade, requests, outbound_encoding).await?;
+    close_outbound(&mut upgrade).await?;
+
+    let response = read_one_response::<C, Resp>(&mut upgrade, response_encoding).await?;
+    finish_with_trailers(&upgrade)?;
+    Ok(response)
+}
+
+async fn bidi_call_impl<C, Req, Resp, S>(
+    client: &trillium_client::Client,
+    path: &str,
+    requests: S,
+    deadline: Option<Instant>,
+) -> Result<ResponseStream<C, Resp>, Status>
+where
+    C: Codec<Req> + Codec<Resp>,
+    Req: Send + 'static,
+    Resp: Send + 'static,
+    S: Stream<Item = Req> + Send + 'static,
+{
+    let outbound_encoding = outbound_encoding_from_client(client);
+    let opened = open_upgrade::<C, Req>(client, path).await?;
+    let response_stream = match opened {
+        OpenUpgrade::Streaming(mut upgrade, response_encoding) => {
+            write_request_stream::<C, Req, S>(&mut upgrade, requests, outbound_encoding).await?;
+            close_outbound(&mut upgrade).await?;
+            ResponseStream::spawn(client, upgrade, response_encoding, deadline)
+        }
+        OpenUpgrade::TrailersOnly(result) => ResponseStream::trailers_only(result),
+    };
+    Ok(response_stream)
+}
+
+/// Result of awaiting an Upgrade-marked conn. Either the upgrade is live
+/// (body + trailers to follow) or the server returned a trailers-only
+/// response (HEADERS+END_STREAM with `grpc-status` in the initial frame).
+enum OpenUpgrade {
+    Streaming(Upgrade, Encoding),
+    TrailersOnly(Result<(), Status>),
+}
+
+impl OpenUpgrade {
+    /// Force the streaming variant. Used by unary + client-streaming which
+    /// always expect a body. Trailers-only responses bypass the upgrade,
+    /// surfacing as a Status error.
+    fn into_streaming(self) -> Result<(Upgrade, Encoding), Status> {
+        match self {
+            OpenUpgrade::Streaming(u, enc) => Ok((u, enc)),
+            OpenUpgrade::TrailersOnly(Ok(())) => {
+                Err(Status::internal("response missing message body"))
+            }
+            OpenUpgrade::TrailersOnly(Err(status)) => Err(status),
+        }
+    }
+}
+
+async fn open_upgrade<C, Req>(
+    client: &trillium_client::Client,
+    path: &str,
+) -> Result<OpenUpgrade, Status>
+where
+    C: Codec<Req>,
+{
+    let conn = grpc_request(client, path, <C as Codec<Req>>::content_type_suffix())
+        .upgrade()
+        .await
+        .map_err(transport_error)?;
+
+    validate_response_headers(&conn)?;
+    let response_encoding = extract_response_encoding(&conn)?;
+
+    if conn.response_headers().get_str("grpc-status").is_some() {
+        return Ok(OpenUpgrade::TrailersOnly(Status::from_trailers(
+            conn.response_headers(),
+        )));
+    }
+
+    let upgrade: Upgrade = conn.into();
+    Ok(OpenUpgrade::Streaming(upgrade, response_encoding))
+}
+
+async fn write_frame(upgrade: &mut Upgrade, frame: &[u8]) -> Result<(), Status> {
+    upgrade
+        .write_all(frame)
+        .await
+        .map_err(|e| Status::unavailable(format!("write error: {e}")))
+}
+
+/// Signal end-of-request-body to the server by closing the upgrade's write
+/// side (which translates to an END_STREAM flag on the h2 stream). We have
+/// no trailers to send, so this is the only way to mark "no more requests
+/// coming" without dropping the upgrade entirely (we still need to read the
+/// response).
+async fn close_outbound(upgrade: &mut Upgrade) -> Result<(), Status> {
+    upgrade
+        .close()
+        .await
+        .map_err(|e| Status::unavailable(format!("close error: {e}")))
+}
+
+async fn write_request_stream<C, Req, S>(
+    upgrade: &mut Upgrade,
+    requests: S,
+    outbound_encoding: Encoding,
+) -> Result<(), Status>
+where
+    C: Codec<Req>,
+    Req: Send + 'static,
+    S: Stream<Item = Req> + Send + 'static,
+{
+    let mut requests = Box::pin(requests);
+    while let Some(req) = requests.next().await {
+        let frame = encode_frame::<C, Req>(&req, outbound_encoding)?;
+        write_frame(upgrade, &frame).await?;
+    }
+    Ok(())
+}
+
+/// Read exactly one response message and confirm the body ended cleanly.
+/// The second `next()` call drives the reader to EOF so trillium-http can
+/// populate `received_trailers()`.
+async fn read_one_response<C, Resp>(
+    upgrade: &mut Upgrade,
+    encoding: Encoding,
+) -> Result<Resp, Status>
 where
     C: Codec<Resp>,
     Resp: Send + 'static,
 {
-    validate_response_headers(&conn)?;
-
-    if conn.response_headers().get_str("grpc-status").is_some() {
-        return match Status::from_trailers(conn.response_headers()) {
-            Ok(()) => Err(Status::internal("response missing message body")),
-            Err(status) => Err(status),
-        };
-    }
-
-    let encoding = extract_response_encoding(&conn)?;
-
-    // Read one message AND drain to EOF so trillium-http populates
-    // response_trailers. The second `next()` will see Ok(0) from the body
-    // and return None, finalizing trailers; if it returns Some, the server
-    // sent more than one message in violation of the contract.
     let (first, second) = {
-        let body = conn.response_body();
-        let mut messages = MessageStream::<C, Resp, _>::new(body).with_encoding(encoding);
+        let mut messages = MessageStream::<Resp, _>::new(&mut *upgrade, <C as Codec<Resp>>::decode)
+            .with_encoding(encoding);
         let first = messages.next().await;
         let second = messages.next().await;
         (first, second)
     };
 
-    let response = match (first, second) {
-        (Some(Ok(resp)), None) => resp,
-        (Some(Ok(_)), Some(_)) => {
-            return Err(Status::internal(
-                "expected one response message, got multiple",
-            ));
-        }
-        (Some(Err(status)), _) | (_, Some(Err(status))) => return Err(status),
-        (None, _) => {
-            return Err(read_grpc_status(&conn).err().unwrap_or_else(|| {
-                Status::internal("response missing message body")
-            }));
-        }
-    };
-
-    read_grpc_status(&conn)?;
-    Ok(response)
+    match (first, second) {
+        (Some(Ok(resp)), None) => Ok(resp),
+        (Some(Ok(_)), Some(_)) => Err(Status::internal(
+            "expected one response message, got multiple",
+        )),
+        (Some(Err(status)), _) | (_, Some(Err(status))) => Err(status),
+        (None, _) => Err(finish_with_trailers(upgrade)
+            .err()
+            .unwrap_or_else(|| Status::internal("response missing message body"))),
+    }
 }
 
-/// Validate response and hand off to a spawned ResponseStream. Used by
-/// server-streaming and bidi. The deadline (if any) is forwarded into the
-/// spawned reader so each message-poll is bounded.
-fn read_streaming_response<C, Resp>(
-    client: &trillium_client::Client,
-    conn: Conn,
-    deadline: Option<Instant>,
-) -> Result<ResponseStream<C, Resp>, Status>
-where
-    C: Codec<Resp>,
-    Resp: Send + 'static,
-{
-    validate_response_headers(&conn)?;
-
-    if conn.response_headers().get_str("grpc-status").is_some() {
-        return Ok(ResponseStream::trailers_only(Status::from_trailers(
-            conn.response_headers(),
-        )));
+/// Inspect the trailers populated by trillium-http after read-to-EOF.
+fn finish_with_trailers(upgrade: &Upgrade) -> Result<(), Status> {
+    match upgrade.received_trailers() {
+        Some(trailers) => Status::from_trailers(trailers),
+        None => Err(Status::internal(
+            "stream ended without grpc-status trailer",
+        )),
     }
-
-    let encoding = extract_response_encoding(&conn)?;
-    Ok(ResponseStream::spawn(client, conn, encoding, deadline))
 }
 
 /// Compute the per-call deadline from the client's `grpc-timeout` default
@@ -215,45 +362,20 @@ where
     }
 }
 
-fn build_unary_conn<C, Req>(
-    client: &trillium_client::Client,
-    path: &str,
-    req: &Req,
-) -> Result<Conn, Status>
-where
-    C: Codec<Req>,
-{
-    let conn = grpc_request(client, path, <C as Codec<Req>>::content_type_suffix());
-    let encoding = outbound_encoding(&conn);
-    let body = encode_frame::<C, Req>(req, encoding)?;
-    Ok(conn.with_body(body))
-}
-
-fn build_streaming_conn<C, Req, S>(
-    client: &trillium_client::Client,
-    path: &str,
-    requests: S,
-) -> Conn
-where
-    C: Codec<Req>,
-    Req: Send + 'static,
-    S: Stream<Item = Req> + Send + 'static,
-{
-    let conn = grpc_request(client, path, <C as Codec<Req>>::content_type_suffix());
-    let encoding = outbound_encoding(&conn);
-    // StreamBody expects Stream<Item = Result<T, Status>> because it
-    // serves the server side too; map our infallible request stream into
-    // the same shape. Body::new_streaming uses only the AsyncRead half, so
-    // the trailers StreamBody produces internally are never read.
-    let body = StreamBody::<C, Req, _>::new(requests.map(Ok::<_, Status>)).with_encoding(encoding);
-    let body = Body::new_streaming(body, None);
-    conn.with_body(body)
-}
-
 fn grpc_request(client: &trillium_client::Client, path: &str, suffix: &'static str) -> Conn {
+    // TEMP: read a version override from a default-header marker so tests can
+    // opt into h3 without a public ServiceClientExt method. If we ship h3
+    // support this gets a real opt-in (set_http3 etc.) and this falls away.
+    let version = match client
+        .default_headers()
+        .get_str("x-trillium-grpc-version")
+    {
+        Some("h3") => Version::Http3,
+        _ => Version::Http2,
+    };
     client
         .post(path)
-        .with_http_version(Version::Http2)
+        .with_http_version(version)
         .with_request_header(
             KnownHeaderName::ContentType,
             format!("application/grpc+{suffix}"),
@@ -276,10 +398,10 @@ fn extract_response_encoding(conn: &Conn) -> Result<Encoding, Status> {
 
 /// Read the `grpc-encoding` header that
 /// [`ServiceClientExt::set_outbound_compression`] stashed in the client's
-/// default headers (which trillium-client copies into every new conn).
-/// Missing or unrecognized → `Identity`.
-fn outbound_encoding(conn: &Conn) -> Encoding {
-    conn.request_headers()
+/// default headers. Missing or unrecognized → `Identity`.
+fn outbound_encoding_from_client(client: &trillium_client::Client) -> Encoding {
+    client
+        .default_headers()
         .get_str("grpc-encoding")
         .and_then(Encoding::from_grpc_encoding)
         .unwrap_or(Encoding::Identity)

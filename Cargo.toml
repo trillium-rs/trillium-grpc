@@ -7,7 +7,10 @@ version = "0.1.0"
 edition = "2024"
 description = "gRPC server and client for trillium, built on trillium-http's h2/h2c/h3 support"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/jbr/trillium-grpc"
+repository = "https://github.com/trillium-rs/trillium-grpc"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = ["gzip"]

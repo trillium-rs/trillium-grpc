@@ -1,0 +1,47 @@
+name: docs
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: build rustdocs and put them on github pages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/install@cargo-docs-rs
+      - name: Build Documentation
+        run: |
+          cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.targets[].kind[] == "lib") | .name' \
+            | xargs -I{} cargo docs-rs -p {}
+          cp -r "target/$(rustc -vV | sed -n 's/host: //p')/doc/." target/doc/
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
+      - name: Fix permissions
+        run: |
+          chmod -c -R +rX "./target/doc" | while read line; do
+            echo "::warning title=Invalid file permissions automatically fixed::$line"
+          done
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./target/doc
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

@@ -1,0 +1,40 @@
+# Runs clippy and uploads the results as SARIF so findings show up as
+# GitHub code-scanning annotations. This is informational (continue-on-error);
+# hard gating happens in ci.yaml.
+name: rust-clippy analyze
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '26 8 * * 6'
+
+jobs:
+  rust-clippy-analyze:
+    name: Run rust-clippy analyzing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: clippy-sarif
+      - uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: sarif-fmt
+      - name: Run rust-clippy
+        run: cargo clippy --message-format=json | clippy-sarif | tee rust-clippy-results.sarif | sarif-fmt
+        continue-on-error: true
+      - name: Upload analysis results to GitHub
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: rust-clippy-results.sarif
+          wait-for-processing: true

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Pure-Rust .proto → Rust codegen backend for trillium-grpc"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/jbr/trillium-grpc"
+repository = "https://github.com/trillium-rs/trillium-grpc"
 
 [dependencies]
 protox = "0.9"

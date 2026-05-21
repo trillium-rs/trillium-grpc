@@ -49,9 +49,6 @@ zstd = { version = "0.13", optional = true }
 trillium-grpc-codegen = { version = "0.1", path = "codegen", optional = true }
 trillium-grpc-macros = { version = "0.1", path = "macros", optional = true }
 
-[build-dependencies]
-tonic-prost-build = "0.14"
-
 [dev-dependencies]
 futures-lite = "2"
 trillium-tokio = "0.6.1"
@@ -59,6 +56,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-stream = "0.1"
 tonic = { version = "0.14", features = ["gzip"] }
 tonic-prost = "0.14"
+# Only used to regenerate the checked-in tonic fixture (tests/proto/gen/). Not a
+# build-dependency, so consumers of this crate never compile it.
+tonic-prost-build = "0.14"
 env_logger = "0.11"
 
 # Temporary: build against the h2-encoder branch for h2/h2c support that

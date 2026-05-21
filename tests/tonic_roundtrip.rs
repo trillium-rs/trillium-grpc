@@ -11,7 +11,7 @@
 //! Rust types.
 
 mod proto {
-    tonic::include_proto!("greeter.v1");
+    include!("proto/gen/greeter.v1.rs");
 }
 
 #[path = "generated/greeter_v1.rs"]

@@ -14,8 +14,9 @@ mod proto {
     include!("proto/gen/greeter.v1.rs");
 }
 
-#[path = "generated/greeter_v1.rs"]
-mod greeter_v1;
+mod greeter_v1 {
+    include!("generated/greeter_v1.rs");
+}
 
 use crate::greeter_v1::{Greeter, GreeterServer, HelloReply, HelloRequest};
 use crate::proto::greeter_client::GreeterClient;

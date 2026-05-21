@@ -27,6 +27,7 @@ use prost_build::{Config, Method, Module, Service, ServiceGenerator};
 use prost_types::FileDescriptorSet;
 use std::{
     collections::BTreeMap,
+    env,
     path::{Path, PathBuf},
 };
 
@@ -40,6 +41,9 @@ pub enum Error {
 
     #[error("generated code did not parse as valid Rust: {0}")]
     Syn(#[from] syn::Error),
+
+    #[error("OUT_DIR is not set; the build-script helpers must run from a build.rs")]
+    NoOutDir,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +121,100 @@ pub fn generate_from_descriptors(
     }
 
     Ok(GeneratedFiles { files })
+}
+
+/// Compile `.proto` files from a build script, writing one Rust module per
+/// package into `OUT_DIR` and emitting `cargo:rerun-if-changed` for every
+/// compiled file (including transitive imports).
+///
+/// `protos` are the source files; `includes` are the directories used to
+/// resolve `import` statements — pass the root(s) of your proto tree. Each
+/// generated `<package>.rs` is pulled into your crate with
+/// `include!(concat!(env!("OUT_DIR"), "/<package>.rs"))`.
+///
+/// This is the zero-config shorthand for [`configure`]. For anything outside
+/// the standard build-script flow — output to a custom location, or feeding
+/// the result to another tool — drop down to [`generate_from_proto`] and write
+/// the files yourself; the OUT_DIR write loop and `rerun-if-changed` emission
+/// are the only things this layer adds.
+pub fn compile_protos<P: AsRef<Path>, I: AsRef<Path>>(
+    protos: &[P],
+    includes: &[I],
+) -> Result<(), Error> {
+    configure().compile(protos, includes)
+}
+
+/// Start configuring a build-script codegen run. See [`compile_protos`] for the
+/// zero-config shorthand.
+pub fn configure() -> Builder {
+    Builder::default()
+}
+
+/// Builder for build-script codegen.
+///
+/// The configuration surface is expected to grow (e.g. selecting client-only
+/// or server-only output); today it controls formatting only. Construct via
+/// [`configure`] and finish with [`Builder::compile`].
+#[derive(Debug, Clone)]
+pub struct Builder {
+    format: bool,
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self { format: true }
+    }
+}
+
+impl Builder {
+    /// Run generated code through `prettyplease`. On by default: OUT_DIR output
+    /// is occasionally inspected while debugging, and the formatting cost is
+    /// paid only when the build script actually re-runs.
+    pub fn format(mut self, yes: bool) -> Self {
+        self.format = yes;
+        self
+    }
+
+    /// Compile `protos`, resolving imports against `includes`, write one
+    /// `<package>.rs` per package into `OUT_DIR`, and emit
+    /// `cargo:rerun-if-changed` for every compiled file. See [`compile_protos`].
+    pub fn compile<P: AsRef<Path>, I: AsRef<Path>>(
+        self,
+        protos: &[P],
+        includes: &[I],
+    ) -> Result<(), Error> {
+        let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or(Error::NoOutDir)?);
+
+        // Drive protox::Compiler with the exact settings protox::compile uses
+        // (source info + imports), so the FileDescriptorSet — and therefore the
+        // generated output — is identical to the CLI and proc-macro paths. The
+        // only reason to use the Compiler directly is `files()`, which gives us
+        // the resolved filesystem paths to feed `rerun-if-changed`, imports
+        // included.
+        let mut compiler = protox::Compiler::new(includes)?;
+        compiler
+            .include_source_info(true)
+            .include_imports(true)
+            .open_files(protos.iter().map(AsRef::as_ref))?;
+
+        for file in compiler.files() {
+            if let Some(path) = file.path() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+
+        let opts = Options {
+            include_paths: Vec::new(),
+            format: self.format,
+        };
+        let generated = generate_from_descriptors(compiler.file_descriptor_set(), &opts)?;
+
+        for (rel_path, content) in &generated.files {
+            std::fs::write(out_dir.join(rel_path), content)?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Format generated source via prettyplease. On parse failure (which would

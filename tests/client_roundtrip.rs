@@ -3,8 +3,9 @@
 //! is covered separately by `tonic_roundtrip.rs`; this file proves the
 //! round-trip works end-to-end through generated code on both sides.
 
-#[path = "generated/greeter_v1.rs"]
-mod greeter_v1;
+mod greeter_v1 {
+    include!("generated/greeter_v1.rs");
+}
 
 use crate::greeter_v1::{Greeter, GreeterClient, GreeterServer, HelloReply, HelloRequest};
 use futures_lite::{StreamExt, stream};

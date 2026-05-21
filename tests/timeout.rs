@@ -7,8 +7,9 @@
 //!    parses the header and emits `DEADLINE_EXCEEDED` trailers.
 //! 3. Untimed calls keep working unchanged.
 
-#[path = "generated/greeter_v1.rs"]
-mod greeter_v1;
+mod greeter_v1 {
+    include!("generated/greeter_v1.rs");
+}
 
 mod proto {
     include!("proto/gen/greeter.v1.rs");

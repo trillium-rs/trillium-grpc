@@ -12,8 +12,9 @@
 //!   sees CANCELLED as the terminal item or the stream is torn down before
 //!   the trailers arrive (still a trillium-http flush issue).
 
-#[path = "generated/greeter_v1.rs"]
-mod greeter_v1;
+mod greeter_v1 {
+    include!("generated/greeter_v1.rs");
+}
 
 use crate::greeter_v1::{Greeter, GreeterClient, GreeterServer, HelloReply, HelloRequest};
 use futures_lite::StreamExt;

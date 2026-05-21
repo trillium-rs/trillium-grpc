@@ -99,7 +99,9 @@ async fn unary_via_generated_client() {
     let (server, greeter) = start_pair!();
 
     let resp = greeter
-        .say_hello(HelloRequest { name: "world".into() })
+        .say_hello(HelloRequest {
+            name: "world".into(),
+        })
         .await
         .unwrap();
 
@@ -115,7 +117,9 @@ async fn unary_error_carries_trailing_metadata() {
     let (server, greeter) = start_pair!();
 
     let err = greeter
-        .say_hello(HelloRequest { name: FAIL_NAME.into() })
+        .say_hello(HelloRequest {
+            name: FAIL_NAME.into(),
+        })
         .await
         .unwrap_err();
 
@@ -160,7 +164,9 @@ async fn bidi_with_gzip_outbound_compression() {
 
     let mut stream = greeter
         .say_hello_chat(stream::iter([
-            HelloRequest { name: "alice".into() },
+            HelloRequest {
+                name: "alice".into(),
+            },
             HelloRequest { name: "bob".into() },
         ]))
         .await
@@ -183,7 +189,9 @@ async fn server_streaming_via_generated_client() {
     let (server, greeter) = start_pair!();
 
     let mut stream = greeter
-        .say_hello_stream(HelloRequest { name: "world".into() })
+        .say_hello_stream(HelloRequest {
+            name: "world".into(),
+        })
         .await
         .unwrap();
 
@@ -208,7 +216,9 @@ async fn client_streaming_via_generated_client() {
 
     let resp = greeter
         .say_hello_many(stream::iter([
-            HelloRequest { name: "alice".into() },
+            HelloRequest {
+                name: "alice".into(),
+            },
             HelloRequest { name: "bob".into() },
         ]))
         .await
@@ -227,9 +237,13 @@ async fn bidi_via_generated_client() {
 
     let mut stream = greeter
         .say_hello_chat(stream::iter([
-            HelloRequest { name: "alice".into() },
+            HelloRequest {
+                name: "alice".into(),
+            },
             HelloRequest { name: "bob".into() },
-            HelloRequest { name: "carol".into() },
+            HelloRequest {
+                name: "carol".into(),
+            },
         ]))
         .await
         .unwrap();

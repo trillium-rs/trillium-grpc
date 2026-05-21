@@ -329,9 +329,7 @@ where
 fn finish_with_trailers(upgrade: &Upgrade) -> Result<(), Status> {
     match upgrade.received_trailers() {
         Some(trailers) => Status::from_trailers(trailers),
-        None => Err(Status::internal(
-            "stream ended without grpc-status trailer",
-        )),
+        None => Err(Status::internal("stream ended without grpc-status trailer")),
     }
 }
 
@@ -366,10 +364,7 @@ fn grpc_request(client: &trillium_client::Client, path: &str, suffix: &'static s
     // TEMP: read a version override from a default-header marker so tests can
     // opt into h3 without a public ServiceClientExt method. If we ship h3
     // support this gets a real opt-in (set_http3 etc.) and this falls away.
-    let version = match client
-        .default_headers()
-        .get_str("x-trillium-grpc-version")
-    {
+    let version = match client.default_headers().get_str("x-trillium-grpc-version") {
         Some("h3") => Version::Http3,
         _ => Version::Http2,
     };
@@ -414,7 +409,9 @@ fn validate_response_headers(conn: &Conn) -> Result<(), Status> {
         return Err(http_to_grpc_status(n));
     }
 
-    let ct = conn.response_headers().get_str(KnownHeaderName::ContentType);
+    let ct = conn
+        .response_headers()
+        .get_str(KnownHeaderName::ContentType);
     if ct.and_then(parse_grpc_content_type).is_none() {
         return Err(Status::internal(format!(
             "unexpected response content-type: {ct:?}"

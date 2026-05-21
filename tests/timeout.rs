@@ -82,11 +82,7 @@ impl Greeter for SlowGreeter {
         mut channel: Channel<'_, HelloRequest, HelloReply>,
     ) -> Result<(), Status> {
         while let Some(req) = channel.recv().await {
-            channel
-                .send(HelloReply {
-                    message: req?.name,
-                })
-                .await?;
+            channel.send(HelloReply { message: req?.name }).await?;
         }
         Ok(())
     }
@@ -173,8 +169,8 @@ async fn tonic_reads_synthetic_deadline_exceeded_from_our_server() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let (server, port) = start_server!();
-    let endpoint = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-        .unwrap();
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}")).unwrap();
     let mut client = TonicGreeter::connect(endpoint).await.unwrap();
 
     let status = client

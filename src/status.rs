@@ -318,7 +318,9 @@ mod tests {
     fn status_round_trip_preserves_metadata() {
         let mut metadata = Metadata::new();
         metadata.insert_ascii("retry-after", "30").unwrap();
-        metadata.insert_binary("debug-bin", vec![0xDE, 0xAD]).unwrap();
+        metadata
+            .insert_binary("debug-bin", vec![0xDE, 0xAD])
+            .unwrap();
 
         let original = Status::resource_exhausted("slow down").with_metadata(metadata);
         let trailers = original.clone().into_trailers();

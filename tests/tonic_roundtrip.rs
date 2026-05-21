@@ -87,8 +87,8 @@ macro_rules! start_server {
 }
 
 async fn connect(port: u16) -> GreeterClient<tonic::transport::Channel> {
-    let endpoint = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-        .unwrap();
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}")).unwrap();
     GreeterClient::connect(endpoint).await.unwrap()
 }
 
@@ -116,13 +116,17 @@ async fn unary_with_gzip_compressed_request() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let (server, port) = start_server!();
-    let mut client = connect(port).await.send_compressed(tonic::codec::CompressionEncoding::Gzip);
+    let mut client = connect(port)
+        .await
+        .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
     // Repeat the name so the message is well above gzip's overhead floor
     // and we're confident the wire payload is genuinely compressed.
     let name = "world ".repeat(200);
     let response = client
-        .say_hello(tonic::Request::new(proto::HelloRequest { name: name.clone() }))
+        .say_hello(tonic::Request::new(proto::HelloRequest {
+            name: name.clone(),
+        }))
         .await
         .unwrap();
 
@@ -146,14 +150,19 @@ async fn server_auto_compresses_response_when_client_accepts_gzip() {
     // the uncompressed one.
     let name = "world ".repeat(200);
     let response = client
-        .say_hello(tonic::Request::new(proto::HelloRequest { name: name.clone() }))
+        .say_hello(tonic::Request::new(proto::HelloRequest {
+            name: name.clone(),
+        }))
         .await
         .unwrap();
 
     // The metadata map exposes response headers. Our server must have
     // selected gzip and announced it.
     assert_eq!(
-        response.metadata().get("grpc-encoding").and_then(|v| v.to_str().ok()),
+        response
+            .metadata()
+            .get("grpc-encoding")
+            .and_then(|v| v.to_str().ok()),
         Some("gzip"),
     );
     assert_eq!(response.into_inner().message, format!("Hello, {name}"));
@@ -197,7 +206,9 @@ async fn client_streaming_roundtrip_against_tonic_client() {
     let mut client = connect(port).await;
 
     let request_stream = tokio_stream::iter(vec![
-        proto::HelloRequest { name: "alice".into() },
+        proto::HelloRequest {
+            name: "alice".into(),
+        },
         proto::HelloRequest { name: "bob".into() },
     ]);
 
@@ -219,9 +230,13 @@ async fn bidi_roundtrip_against_tonic_client() {
     let mut client = connect(port).await;
 
     let request_stream = tokio_stream::iter(vec![
-        proto::HelloRequest { name: "alice".into() },
+        proto::HelloRequest {
+            name: "alice".into(),
+        },
         proto::HelloRequest { name: "bob".into() },
-        proto::HelloRequest { name: "carol".into() },
+        proto::HelloRequest {
+            name: "carol".into(),
+        },
     ]);
 
     let response = client

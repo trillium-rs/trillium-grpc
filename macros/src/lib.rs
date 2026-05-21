@@ -24,7 +24,12 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use std::{collections::BTreeMap, path::PathBuf};
-use syn::{LitStr, Token, parse::{Parse, ParseStream}, parse_macro_input, punctuated::Punctuated};
+use syn::{
+    LitStr, Token,
+    parse::{Parse, ParseStream},
+    parse_macro_input,
+    punctuated::Punctuated,
+};
 
 struct Args {
     paths: Punctuated<LitStr, Token![,]>,
@@ -103,7 +108,10 @@ fn expand(args: Args) -> syn::Result<TokenStream2> {
     };
 
     let generated = trillium_grpc_codegen::generate_from_proto(&srcs, &opts).map_err(|e| {
-        syn::Error::new(Span::call_site(), format!("trillium-grpc codegen failed: {e}"))
+        syn::Error::new(
+            Span::call_site(),
+            format!("trillium-grpc codegen failed: {e}"),
+        )
     })?;
 
     let tree = build_tree(generated.files)?;

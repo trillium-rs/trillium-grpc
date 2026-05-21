@@ -30,10 +30,8 @@ use trillium_server_common::Runtime;
 pub trait Server: Sized + 'static {
     /// Unary RPC: read exactly one request, await the user function, emit one
     /// response frame followed by `grpc-status` trailers.
-    async fn unary<Req, Resp>(
-        upgrade: Upgrade,
-        f: impl AsyncFnOnce(Req) -> Result<Resp, Status>,
-    ) where
+    async fn unary<Req, Resp>(upgrade: Upgrade, f: impl AsyncFnOnce(Req) -> Result<Resp, Status>)
+    where
         Self: Codec<Req> + Codec<Resp>,
         Req: Send + 'static,
         Resp: Send + 'static,
@@ -155,11 +153,8 @@ async fn client_streaming_impl<C, Req, Resp>(
 
     let result = cancellation
         .race(async {
-            let requests = RequestStream::new(
-                &mut upgrade,
-                <C as Codec<Req>>::decode,
-                request_encoding,
-            );
+            let requests =
+                RequestStream::new(&mut upgrade, <C as Codec<Req>>::decode, request_encoding);
             f(requests).await
         })
         .await;
@@ -242,11 +237,8 @@ async fn server_streaming_impl<C, Req, Resp>(
     let result = cancellation
         .race(async {
             let req = read_one_request::<C, Req>(&mut upgrade, request_encoding).await?;
-            let sink = ResponseSink::new(
-                &mut upgrade,
-                <C as Codec<Resp>>::encode,
-                response_encoding,
-            );
+            let sink =
+                ResponseSink::new(&mut upgrade, <C as Codec<Resp>>::encode, response_encoding);
             f(req, sink).await
         })
         .await;
@@ -368,16 +360,13 @@ fn has_grpc_content_type(conn: &Conn) -> bool {
         .is_some()
 }
 
-async fn read_one_request<C, Req>(
-    upgrade: &mut Upgrade,
-    encoding: Encoding,
-) -> Result<Req, Status>
+async fn read_one_request<C, Req>(upgrade: &mut Upgrade, encoding: Encoding) -> Result<Req, Status>
 where
     C: Codec<Req>,
     Req: Send + 'static,
 {
-    let mut stream = MessageStream::<Req, _>::new(upgrade, <C as Codec<Req>>::decode)
-        .with_encoding(encoding);
+    let mut stream =
+        MessageStream::<Req, _>::new(upgrade, <C as Codec<Req>>::decode).with_encoding(encoding);
     match stream.next().await {
         Some(Ok(req)) => Ok(req),
         Some(Err(status)) => Err(status),

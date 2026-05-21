@@ -42,7 +42,12 @@ struct SleepyGreeter {
 impl SleepyGreeter {
     fn new() -> (Self, Arc<AtomicBool>) {
         let flag = Arc::new(AtomicBool::new(false));
-        (Self { unary_dropped: flag.clone() }, flag)
+        (
+            Self {
+                unary_dropped: flag.clone(),
+            },
+            flag,
+        )
     }
 }
 
@@ -62,7 +67,9 @@ impl Greeter for SleepyGreeter {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             responses
-                .send(HelloReply { message: format!("msg {i}") })
+                .send(HelloReply {
+                    message: format!("msg {i}"),
+                })
                 .await?;
             i += 1;
         }
@@ -83,7 +90,9 @@ impl Greeter for SleepyGreeter {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
             channel
-                .send(HelloReply { message: "tick".into() })
+                .send(HelloReply {
+                    message: "tick".into(),
+                })
                 .await?;
         }
     }
@@ -130,7 +139,11 @@ async fn shutdown_drops_in_flight_unary_handler() {
     // Fire and forget — once cancellation lands server-side, the handler
     // future is dropped, which is what we're asserting on.
     let _call = tokio::spawn(async move {
-        let _ = greeter.say_hello(HelloRequest { name: "world".into() }).await;
+        let _ = greeter
+            .say_hello(HelloRequest {
+                name: "world".into(),
+            })
+            .await;
     });
 
     // Let the call reach the server.
@@ -160,7 +173,9 @@ async fn shutdown_ends_in_flight_server_stream() {
     let greeter = our_client(port);
 
     let mut stream = greeter
-        .say_hello_stream(HelloRequest { name: "world".into() })
+        .say_hello_stream(HelloRequest {
+            name: "world".into(),
+        })
         .await
         .expect("stream open");
 
@@ -169,8 +184,7 @@ async fn shutdown_ends_in_flight_server_stream() {
     assert!(first.is_ok(), "first message: {first:?}");
 
     // Shut down in a task so we can keep draining the stream.
-    let shutdown =
-        tokio::spawn(async move { server.shut_down().await });
+    let shutdown = tokio::spawn(async move { server.shut_down().await });
 
     // Drain remaining items. With the borrowed-primitive design the user's
     // future is dropped on shutdown and the framework writes CANCELLED
@@ -200,5 +214,8 @@ async fn shutdown_ends_in_flight_server_stream() {
     // Sanity: a forever-stream cut by ~50ms of shutdown delay should not
     // have produced anywhere near as many messages as the user fn would
     // have produced unmolested.
-    assert!(tail_ok < 50, "stream did not end promptly: {tail_ok} more after first");
+    assert!(
+        tail_ok < 50,
+        "stream did not end promptly: {tail_ok} more after first"
+    );
 }

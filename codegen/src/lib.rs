@@ -108,7 +108,11 @@ pub fn generate_from_descriptors(
     for (module, code) in raw {
         let filename = module.to_file_name_or("_");
         let path = PathBuf::from(filename);
-        let body = if opts.format { format_rust(&code) } else { code };
+        let body = if opts.format {
+            format_rust(&code)
+        } else {
+            code
+        };
         files.insert(path, body);
     }
 
@@ -233,7 +237,8 @@ fn render_trait_method(method: &Method) -> proc_macro2::TokenStream {
     use quote::{format_ident, quote};
     let name = format_ident!("{}", method.name);
     let input: syn::Type = syn::parse_str(&method.input_type).expect("valid Rust type from prost");
-    let output: syn::Type = syn::parse_str(&method.output_type).expect("valid Rust type from prost");
+    let output: syn::Type =
+        syn::parse_str(&method.output_type).expect("valid Rust type from prost");
 
     // For the four call shapes, generate trait signatures that match the
     // borrowed-primitive dispatch shape: framework owns the upgrade and

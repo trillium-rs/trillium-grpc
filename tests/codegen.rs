@@ -14,11 +14,8 @@ fn greeter_v1_matches_committed_output() {
         include_paths: vec![PathBuf::from("tests/proto")],
         ..Options::default()
     };
-    let generated = generate_from_proto(
-        &[PathBuf::from("tests/proto/greeter.proto")],
-        &opts,
-    )
-    .expect("codegen succeeds");
+    let generated = generate_from_proto(&[PathBuf::from("tests/proto/greeter.proto")], &opts)
+        .expect("codegen succeeds");
 
     let actual = generated
         .files

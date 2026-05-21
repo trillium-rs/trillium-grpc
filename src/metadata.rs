@@ -310,10 +310,7 @@ mod tests {
         m.write_into(&mut headers);
 
         let parsed = Metadata::from_headers(&headers);
-        let entries: Vec<_> = parsed
-            .iter()
-            .map(|(k, v)| (k, v.clone()))
-            .collect();
+        let entries: Vec<_> = parsed.iter().map(|(k, v)| (k, v.clone())).collect();
 
         let trace_ids: Vec<_> = entries
             .iter()

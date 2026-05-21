@@ -166,8 +166,7 @@ fn deflate_decompress(data: &[u8], max_size: usize) -> Result<Vec<u8>, Status> {
 
 #[cfg(feature = "zstd")]
 fn zstd_compress(data: &[u8]) -> Result<Vec<u8>, Status> {
-    zstd::stream::encode_all(data, 0)
-        .map_err(|e| Status::internal(format!("zstd compress: {e}")))
+    zstd::stream::encode_all(data, 0).map_err(|e| Status::internal(format!("zstd compress: {e}")))
 }
 
 #[cfg(feature = "zstd")]

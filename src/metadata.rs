@@ -6,39 +6,53 @@
 //! are owned by the framework and rejected on insert.
 //!
 //! [`Metadata`] is an ordered map that round-trips through
-//! `trillium::Headers`. In Phase 6a it backs `Status::metadata` (Err-path
-//! trailing metadata). Initial request/response metadata will be plumbed
-//! through Request/Response wrappers in a follow-up phase.
+//! `trillium::Headers`. It backs [`Status::metadata`](crate::Status::metadata),
+//! the trailing metadata sent alongside an error status.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use trillium::Headers;
 
+/// An ordered, multi-valued map of custom gRPC metadata. Keys may repeat;
+/// insertion order is preserved through the round-trip to and from
+/// `trillium::Headers`.
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
     entries: Vec<(String, MetadataValue)>,
 }
 
+/// A single metadata value: either printable ASCII text or, for `-bin` keys,
+/// raw bytes (base64-encoded on the wire).
 #[derive(Debug, Clone)]
 pub enum MetadataValue {
+    /// A printable-ASCII text value.
     Ascii(String),
+    /// A raw byte value, carried base64-encoded under a `-bin` key.
     Binary(Vec<u8>),
 }
 
+/// Why an insert into [`Metadata`] was rejected.
 #[derive(Debug, thiserror::Error)]
 pub enum MetadataError {
+    /// The key contained characters outside `[0-9a-z_\-.]`.
     #[error("metadata key {0:?} contains invalid characters (must match [0-9a-z_\\-.]+)")]
     InvalidKey(String),
+    /// The key is one the gRPC framework or HTTP transport owns.
     #[error("metadata key {0:?} is reserved by the gRPC framework")]
     ReservedKey(String),
+    /// An ASCII insert was given a `-bin` key, which is reserved for binary
+    /// values.
     #[error("ASCII metadata key {0:?} must not end in -bin")]
     AsciiKeyHasBinSuffix(String),
+    /// A binary insert was given a key that doesn't end in `-bin`.
     #[error("binary metadata key {0:?} must end in -bin")]
     BinaryKeyMissingBinSuffix(String),
+    /// An ASCII value contained bytes outside the printable range 0x20–0x7E.
     #[error("ASCII metadata value contains non-printable bytes")]
     InvalidAsciiValue,
 }
 
 impl MetadataValue {
+    /// The text, if this is an [`Ascii`](Self::Ascii) value; `None` for binary.
     pub fn as_ascii(&self) -> Option<&str> {
         match self {
             Self::Ascii(s) => Some(s),
@@ -46,6 +60,7 @@ impl MetadataValue {
         }
     }
 
+    /// The bytes, if this is a [`Binary`](Self::Binary) value; `None` for ASCII.
     pub fn as_binary(&self) -> Option<&[u8]> {
         match self {
             Self::Binary(b) => Some(b),
@@ -55,14 +70,17 @@ impl MetadataValue {
 }
 
 impl Metadata {
+    /// An empty metadata map.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Whether there are zero entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// The number of entries, counting repeated keys separately.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -127,6 +145,7 @@ impl Metadata {
         })
     }
 
+    /// Iterate over `(key, value)` pairs in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &MetadataValue)> {
         self.entries.iter().map(|(k, v)| (k.as_str(), v))
     }

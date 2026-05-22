@@ -73,9 +73,12 @@ env_logger = "0.11"
 # (trillium-tokio) and trillium-server-common own the connection-accept
 # loop where h2c preface-sniffing happens, so they need the patched
 # version too.
-# [patch.crates-io]
-# trillium = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }
-# trillium-http = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }
-# trillium-macros = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }
-# trillium-server-common = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }
-# trillium-tokio = { git = "https://github.com/trillium-rs/trillium", branch = "h2-encoder" }
+[patch.crates-io]
+trillium = { path = "../trillium/trillium" }
+trillium-http = { path = "../trillium/http" }
+trillium-client = { path = "../trillium/client" }
+trillium-macros = { path = "../trillium/macros" }
+trillium-server-common = { path = "../trillium/server-common" }
+trillium-tokio = { path = "../trillium/tokio" }
+trillium-quinn = { path = "../trillium/quinn" }
+trillium-rustls = { path = "../trillium/rustls" }

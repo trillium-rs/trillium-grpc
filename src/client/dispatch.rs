@@ -86,8 +86,10 @@ pub trait Client: Sized + 'static {
     /// Bidirectional-streaming RPC: send a stream of requests, return a
     /// stream of responses.
     ///
-    /// Currently the request stream is fully drained before the response
-    /// stream begins. True concurrent duplex on the client is a follow-up.
+    /// The request stream is drained in full before the response stream is
+    /// read, so the two directions don't overlap on the client — fine for
+    /// request-then-response exchanges, not for protocols that interleave.
+    /// Open an issue if you need concurrent duplex.
     async fn bidi_call<Req, Resp, S>(
         client: &trillium_client::Client,
         path: &str,

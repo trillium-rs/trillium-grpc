@@ -1870,9 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "trillium"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42555814b00d06d4e3ea4dc1ee1929cfab2d776512b8850a907da51393ef9bc7"
+version = "1.2.0"
 dependencies = [
  "futures-lite",
  "log",
@@ -1882,9 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "trillium-client"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abb7fe26cf1b5a8847c9dd916837ef14d47cea127c6a9a0992ad236d35417148"
+version = "0.9.1"
 dependencies = [
  "crossbeam-queue",
  "dashmap",
@@ -1957,9 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "trillium-http"
-version = "1.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bebd0e13333ef1b74582d8b22188041d6708033a2fbcf8a61afceead552da70c"
+version = "1.3.0"
 dependencies = [
  "atomic-waker",
  "encoding_rs",
@@ -1987,8 +1981,6 @@ dependencies = [
 [[package]]
 name = "trillium-macros"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3caa8c474e8cfacd96ca0692f57f932891543db2147beca4758a075a7d26a0b2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1998,8 +1990,6 @@ dependencies = [
 [[package]]
 name = "trillium-server-common"
 version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd3dd35f2a09ec85c5367962bf37fe697ebebf03d8453adce89fbe759d47cc62"
 dependencies = [
  "async-channel",
  "async_cell",
@@ -2018,8 +2008,6 @@ dependencies = [
 [[package]]
 name = "trillium-tokio"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b0d2e388eae1c568fb0ec5fe8d44253cbd338aa56139da9bb5663b22de01e2d"
 dependencies = [
  "async-compat",
  "log",
@@ -2483,3 +2471,11 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "trillium-quinn"
+version = "0.1.3"
+
+[[patch.unused]]
+name = "trillium-rustls"
+version = "0.11.1"

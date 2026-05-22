@@ -1,3 +1,5 @@
+//! Decode a gRPC body into a stream of messages. See [`MessageStream`].
+
 use crate::{Encoding, Status};
 use futures_lite::{AsyncRead, Stream};
 use std::{
@@ -52,6 +54,11 @@ impl ReadState {
 }
 
 impl<T, R> MessageStream<T, R> {
+    /// Wrap `reader` (a gRPC body), decoding each frame's payload with
+    /// `decode`. Defaults to `Identity` encoding and the
+    /// [`DEFAULT_MAX_MESSAGE_SIZE`] cap; adjust with
+    /// [`with_encoding`](Self::with_encoding) and
+    /// [`with_max_message_size`](Self::with_max_message_size).
     pub fn new(reader: R, decode: fn(&[u8]) -> Result<T, Status>) -> Self {
         Self {
             reader,
@@ -62,6 +69,8 @@ impl<T, R> MessageStream<T, R> {
         }
     }
 
+    /// Reject any single message whose framed length (or decompressed size)
+    /// exceeds `max` bytes, with `ResourceExhausted`.
     pub fn with_max_message_size(mut self, max: usize) -> Self {
         self.max_message_size = max;
         self

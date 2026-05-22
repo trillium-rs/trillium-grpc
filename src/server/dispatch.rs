@@ -1,3 +1,6 @@
+//! Server-side request dispatch: the [`Server`] trait whose methods generated
+//! code calls per RPC, plus the [`prepare_grpc_conn`] preflight helper.
+
 use crate::{
     Codec, Encoding, Status,
     frame::{reader::MessageStream, writer::encode_frame},

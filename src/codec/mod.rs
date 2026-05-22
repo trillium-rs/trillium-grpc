@@ -1,3 +1,6 @@
+//! Message codecs: the [`Codec`] trait and the default [`Prost`]
+//! implementation.
+
 use crate::Status;
 use bytes::Bytes;
 
@@ -15,6 +18,11 @@ pub trait Codec<T>: 'static {
     /// — the spec says the bare type implies protobuf.
     fn content_type_suffix() -> &'static str;
 
+    /// Serialize one message to its wire bytes. The framing layer wraps the
+    /// result in a length-prefixed gRPC frame; this is just the payload.
     fn encode(value: &T) -> Result<Bytes, Status>;
+
+    /// Deserialize one message from the bytes of a single frame's payload
+    /// (already de-framed and decompressed).
     fn decode(bytes: &[u8]) -> Result<T, Status>;
 }

@@ -1,3 +1,6 @@
+//! Request preflight checks: the `content-type` and `te: trailers` headers
+//! the gRPC HTTP/2 protocol requires.
+
 use trillium::{Headers, KnownHeaderName};
 
 /// Parse a gRPC content-type header.

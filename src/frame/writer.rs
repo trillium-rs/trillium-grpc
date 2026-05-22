@@ -1,3 +1,5 @@
+//! Encode a message into a gRPC frame. See [`encode_frame`].
+
 use std::borrow::Cow;
 
 use crate::{Codec, Encoding, Status};

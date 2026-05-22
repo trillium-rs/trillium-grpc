@@ -13,7 +13,10 @@ use std::time::Duration;
 /// Generated `<Service>Client` newtypes implement this so extension traits
 /// can configure the underlying [`trillium_client::Client`].
 pub trait ServiceClient {
+    /// The underlying connection client.
     fn client(&self) -> &trillium_client::Client;
+    /// The underlying connection client, mutably — the hook the
+    /// [`ServiceClientExt`] setters write through.
     fn client_mut(&mut self) -> &mut trillium_client::Client;
 }
 

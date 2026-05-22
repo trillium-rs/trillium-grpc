@@ -1,29 +1,64 @@
+//! RPC outcomes: the [`Status`] type and its [`Code`], plus the `grpc-status`
+//! trailer (de)serialization that moves them on and off the wire.
+
 use crate::Metadata;
 use trillium::Headers;
 
+/// A gRPC status code — the integer carried in the `grpc-status` trailer.
+///
+/// The discriminants are the canonical gRPC code numbers, so `as u8` and
+/// [`from_u8`](Self::from_u8) move between the enum and its wire form. `Ok`
+/// (0) is the success code; every other variant is an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Code {
+    /// Not an error; the RPC completed successfully.
     Ok = 0,
+    /// The operation was cancelled, typically by the caller.
     Cancelled = 1,
+    /// An error whose cause doesn't map to a more specific code. Also the
+    /// code a missing or unparseable `grpc-status` resolves to.
     Unknown = 2,
+    /// The client supplied an argument the server could not accept (as opposed
+    /// to [`FailedPrecondition`](Self::FailedPrecondition), this is independent
+    /// of system state).
     InvalidArgument = 3,
+    /// The deadline expired before the operation could complete.
     DeadlineExceeded = 4,
+    /// A requested entity was not found.
     NotFound = 5,
+    /// An entity the client tried to create already exists.
     AlreadyExists = 6,
+    /// The caller is authenticated but lacks permission for this operation.
     PermissionDenied = 7,
+    /// A resource has been exhausted — a quota, or perhaps the message-size
+    /// limit.
     ResourceExhausted = 8,
+    /// The system is not in a state required for the operation (e.g. acting on
+    /// a resource that must first be initialized).
     FailedPrecondition = 9,
+    /// The operation was aborted, often due to a concurrency conflict.
     Aborted = 10,
+    /// The operation was attempted past the valid range.
     OutOfRange = 11,
+    /// The operation is not implemented or not supported. Also the code a
+    /// `404` from the transport maps to.
     Unimplemented = 12,
+    /// An internal invariant was broken — something the implementation expected
+    /// to hold did not.
     Internal = 13,
+    /// The service is unavailable, typically a transient condition the caller
+    /// can retry with backoff.
     Unavailable = 14,
+    /// Unrecoverable data loss or corruption.
     DataLoss = 15,
+    /// The request lacks valid authentication credentials.
     Unauthenticated = 16,
 }
 
 impl Code {
+    /// Convert a wire byte to a `Code`, or `None` if it isn't one of the 0–16
+    /// gRPC codes.
     pub fn from_u8(n: u8) -> Option<Self> {
         Some(match n {
             0 => Self::Ok,
@@ -47,21 +82,37 @@ impl Code {
         })
     }
 
+    /// The canonical gRPC code number, as written into the `grpc-status`
+    /// trailer.
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
 }
 
+/// The outcome of an RPC: a [`Code`], a human-readable message, and any
+/// trailing [`Metadata`].
+///
+/// This is both the error type returned from service methods and the value
+/// parsed back out of a response's `grpc-status` trailers. It implements
+/// [`std::error::Error`], so `?` works in any method returning `Result<_,
+/// Status>`. Build one with [`new`](Self::new) or a code-named constructor
+/// such as [`not_found`](Self::not_found).
 #[derive(Debug, Clone)]
 pub struct Status {
+    /// The gRPC status code.
     pub code: Code,
+    /// A human-readable description. Percent-encoded on the wire so it can
+    /// carry arbitrary UTF-8.
     pub message: String,
+    /// Trailing metadata sent alongside the status.
     pub metadata: Metadata,
 }
 
 macro_rules! status_constructors {
     ($($name:ident => $variant:ident),* $(,)?) => {
         $(
+            /// Construct a `Status` with this code and the given message, and
+            /// empty metadata.
             pub fn $name(message: impl Into<String>) -> Self {
                 Self {
                     code: Code::$variant,
@@ -74,6 +125,9 @@ macro_rules! status_constructors {
 }
 
 impl Status {
+    /// Construct a `Status` with the given code and message, and empty
+    /// metadata. The code-named constructors ([`not_found`](Self::not_found),
+    /// [`internal`](Self::internal), …) are usually more convenient.
     pub fn new(code: Code, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -82,6 +136,7 @@ impl Status {
         }
     }
 
+    /// The success status: code `Ok`, empty message, empty metadata.
     pub fn ok() -> Self {
         Self {
             code: Code::Ok,
@@ -90,6 +145,7 @@ impl Status {
         }
     }
 
+    /// Whether this status is the success code.
     pub fn is_ok(&self) -> bool {
         matches!(self.code, Code::Ok)
     }
@@ -120,12 +176,16 @@ impl Status {
         unauthenticated      => Unauthenticated,
     }
 
+    /// Serialize into a fresh `Headers`, suitable for use as response
+    /// trailers. See [`write_into`](Self::write_into) for the header layout.
     pub fn into_trailers(self) -> Headers {
         let mut headers = Headers::new();
         self.write_into(&mut headers);
         headers
     }
 
+    /// Write `grpc-status` (and, when non-empty, the percent-encoded
+    /// `grpc-message`) plus any trailing metadata into `headers`.
     pub fn write_into(&self, headers: &mut Headers) {
         headers.insert("grpc-status", self.code.as_u8().to_string());
         if !self.message.is_empty() {

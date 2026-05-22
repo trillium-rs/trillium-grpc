@@ -25,13 +25,19 @@ use crate::Status;
 /// and the per-frame `max_message_size` in [`crate::frame::reader`].
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
+/// A per-message compression codec. Which variants exist depends on the
+/// enabled Cargo features; `Identity` (no compression) is always present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Encoding {
+    /// No compression.
     Identity,
+    /// gzip (`flate2`), enabled by the `gzip` feature.
     #[cfg(feature = "gzip")]
     Gzip,
+    /// raw DEFLATE (`flate2`), enabled by the `deflate` feature.
     #[cfg(feature = "deflate")]
     Deflate,
+    /// Zstandard (`zstd`), enabled by the `zstd` feature.
     #[cfg(feature = "zstd")]
     Zstd,
 }
@@ -64,6 +70,7 @@ impl Encoding {
         }
     }
 
+    /// The `grpc-encoding` token for this codec (`"identity"`, `"gzip"`, …).
     pub fn as_grpc_encoding(&self) -> &'static str {
         match self {
             Self::Identity => "identity",

@@ -17,11 +17,10 @@
 //!
 //! Streaming server-side trait methods take borrowed primitives
 //! (`RequestStream<'_, Req>`, `ResponseSink<'_, Resp>`, `Channel<'_, Req, Resp>`)
-//! whose lifetime is tied to the user closure. Returned streams have been
-//! removed from the server trait — responses are pushed through the sink
-//! and the framework writes `grpc-status` trailers based on the user's
-//! `Result`. The client-facing methods still expose `impl Stream`-based
-//! ergonomics on top of a spawned reader.
+//! whose lifetime is tied to the user closure: responses are pushed through the
+//! sink and the framework writes `grpc-status` trailers based on the user's
+//! `Result`. The client-facing methods expose `impl Stream`-based ergonomics on
+//! top of a spawned reader.
 
 use prost_build::{Config, Method, Module, Service, ServiceGenerator};
 use prost_types::FileDescriptorSet;
@@ -31,30 +30,36 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Anything that can go wrong while generating Rust from `.proto` sources.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// protox failed to parse or resolve the `.proto` sources.
     #[error("failed to compile .proto sources: {0}")]
     Protox(#[from] protox::Error),
 
+    /// An I/O error from prost-build or from writing output files.
     #[error("prost-build failed: {0}")]
     ProstBuild(#[from] std::io::Error),
 
+    /// The generated source didn't parse as Rust — a codegen bug.
     #[error("generated code did not parse as valid Rust: {0}")]
     Syn(#[from] syn::Error),
 
+    /// A build-script helper was called outside a build script (no `OUT_DIR`).
     #[error("OUT_DIR is not set; the build-script helpers must run from a build.rs")]
     NoOutDir,
 }
 
+/// Settings for a [`generate_from_proto`] / [`generate_from_descriptors`] run.
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Include paths handed to protox for resolving `import` statements.
     pub include_paths: Vec<PathBuf>,
 
-    /// Run the generated code through `prettyplease`. The CLI wants this
-    /// (output is committed and read by humans); the proc-macro path
-    /// re-tokenizes the result immediately and benefits nothing from
-    /// pretty-printing, so it sets this to `false`.
+    /// Run the generated code through `prettyplease`. Leave this on when the
+    /// output is written to a file a human will read; turn it off when the
+    /// result is fed straight back into the compiler (as the proc-macro path
+    /// does), where pretty-printing is wasted work.
     pub format: bool,
 }
 
@@ -67,6 +72,7 @@ impl Default for Options {
     }
 }
 
+/// The Rust modules produced by a codegen run — one entry per proto package.
 #[derive(Debug, Default)]
 pub struct GeneratedFiles {
     /// Map of `<package>.rs` → file contents. Pretty-printed iff
@@ -150,11 +156,9 @@ pub fn configure() -> Builder {
     Builder::default()
 }
 
-/// Builder for build-script codegen.
-///
-/// The configuration surface is expected to grow (e.g. selecting client-only
-/// or server-only output); today it controls formatting only. Construct via
-/// [`configure`] and finish with [`Builder::compile`].
+/// Builder for build-script codegen. Construct via [`configure`], set options,
+/// and finish with [`Builder::compile`]. The one option is whether to
+/// pretty-print the output.
 #[derive(Debug, Clone)]
 pub struct Builder {
     format: bool,

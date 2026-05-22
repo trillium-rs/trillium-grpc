@@ -1,3 +1,12 @@
+//! The client half of trillium-grpc.
+//!
+//! A generated `<Service>Client` wraps a [`trillium_client::Client`] and
+//! exposes one async method per RPC. Each method calls through the [`Client`]
+//! dispatch trait, which encodes the request, opens an HTTP/2 stream, and reads
+//! the response and its `grpc-status` trailers back. Streaming responses arrive
+//! as a [`ResponseStream`]. Per-client configuration (compression, deadlines)
+//! lives on [`ServiceClientExt`].
+
 mod dispatch;
 mod response_stream;
 mod service_client;

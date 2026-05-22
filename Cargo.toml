@@ -30,8 +30,8 @@ name = "macros"
 required-features = ["macros"]
 
 [dependencies]
-trillium = "1.1.0"
-trillium-http = "1.2.0"
+trillium = "1.2.0"
+trillium-http = "1.3.0"
 trillium-client = "0.9"
 trillium-server-common = "0.7"
 prost = "0.14"
@@ -59,26 +59,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-stream = "0.1"
 tonic = { version = "0.14", features = ["gzip"] }
 tonic-prost = "0.14"
+
+
 # Only used to regenerate the checked-in tonic fixture (tests/proto/gen/). Not a
 # build-dependency, so consumers of this crate never compile it.
 tonic-prost-build = "0.14"
 env_logger = "0.11"
-
-# Temporary: build against the h2-encoder branch for h2/h2c support that
-# isn't in the published 1.0.0-rc.1. Drop this block once h2 lands in a
-# released version. Pinned to a branch (not local path) so working in
-# ../trillium doesn't accidentally affect this repo.
-#
-# All trillium-* crates must share a single source — the runtime adapter
-# (trillium-tokio) and trillium-server-common own the connection-accept
-# loop where h2c preface-sniffing happens, so they need the patched
-# version too.
-[patch.crates-io]
-trillium = { path = "../trillium/trillium" }
-trillium-http = { path = "../trillium/http" }
-trillium-client = { path = "../trillium/client" }
-trillium-macros = { path = "../trillium/macros" }
-trillium-server-common = { path = "../trillium/server-common" }
-trillium-tokio = { path = "../trillium/tokio" }
-trillium-quinn = { path = "../trillium/quinn" }
-trillium-rustls = { path = "../trillium/rustls" }

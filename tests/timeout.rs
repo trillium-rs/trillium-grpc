@@ -7,6 +7,7 @@
 //!    parses the header and emits `DEADLINE_EXCEEDED` trailers.
 //! 3. Untimed calls keep working unchanged.
 
+#[allow(dead_code)] // committed codegen output; not every RPC is exercised here
 mod greeter_v1 {
     include!("generated/greeter_v1.rs");
 }

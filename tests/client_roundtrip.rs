@@ -3,6 +3,7 @@
 //! is covered separately by `tonic_roundtrip.rs`; this file proves the
 //! round-trip works end-to-end through generated code on both sides.
 
+#[allow(dead_code)] // committed codegen output; not every RPC is exercised here
 mod greeter_v1 {
     include!("generated/greeter_v1.rs");
 }

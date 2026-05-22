@@ -14,6 +14,7 @@ mod proto {
     include!("proto/gen/greeter.v1.rs");
 }
 
+#[allow(dead_code)] // committed codegen output; not every RPC is exercised here
 mod greeter_v1 {
     include!("generated/greeter_v1.rs");
 }

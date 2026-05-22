@@ -12,6 +12,7 @@
 //!   sees CANCELLED as the terminal item or the stream is torn down before
 //!   the trailers arrive (still a trillium-http flush issue).
 
+#[allow(dead_code)] // committed codegen output; not every RPC is exercised here
 mod greeter_v1 {
     include!("generated/greeter_v1.rs");
 }

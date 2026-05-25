@@ -6,11 +6,12 @@
 //!   sees CANCELLED, because trillium-http currently does not flush the
 //!   response when shutdown is initiated mid-RPC (separate issue, will
 //!   surface as `Code::Cancelled` to the caller once fixed).
-//! - Server-streaming: the user closure (which now drives writes directly
-//!   through `ResponseSink`) is dropped mid-flight on shutdown; the
-//!   framework writes `grpc-status: 1 (CANCELLED)` trailers. Peer either
-//!   sees CANCELLED as the terminal item or the stream is torn down before
-//!   the trailers arrive (still a trillium-http flush issue).
+//! - Server-streaming: the user returns a response `Stream` that the framework
+//!   pulls into the response body; on shutdown the body's cancel signal fires
+//!   between frames and the framework writes `grpc-status: 1 (CANCELLED)`
+//!   trailers. The peer either sees CANCELLED as the terminal item or the
+//!   stream is torn down before the trailers arrive (a trillium-http flush
+//!   issue).
 
 #[allow(dead_code)] // committed codegen output; not every RPC is exercised here
 mod greeter_v1 {
@@ -22,7 +23,25 @@ use futures_lite::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use trillium_grpc::{Channel, RequestStream, ResponseSink, Status};
+use trillium_grpc::{BidiResponder, Channel, GrpcServerConn, Status, Stream};
+
+/// Bidi responder that ticks forever, so shutdown can cut an in-flight loop.
+struct SleepyChat;
+impl BidiResponder<HelloRequest, HelloReply> for SleepyChat {
+    async fn respond(
+        self,
+        mut channel: Channel<'_, HelloRequest, HelloReply>,
+    ) -> Result<(), Status> {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            channel
+                .send(HelloReply {
+                    message: "tick".into(),
+                })
+                .await?;
+        }
+    }
+}
 
 /// Drop sentinel: when its containing future is dropped, the flag flips.
 /// Lets us assert that a long-running handler future was actually
@@ -54,7 +73,11 @@ impl SleepyGreeter {
 }
 
 impl Greeter for SleepyGreeter {
-    async fn say_hello(&self, _req: HelloRequest) -> Result<HelloReply, Status> {
+    async fn say_hello(
+        &self,
+        _conn: &mut GrpcServerConn,
+        _req: HelloRequest,
+    ) -> Result<HelloReply, Status> {
         let _track = DropFlag(self.unary_dropped.clone());
         std::future::pending::<()>().await;
         unreachable!()
@@ -62,41 +85,32 @@ impl Greeter for SleepyGreeter {
 
     async fn say_hello_stream(
         &self,
+        _conn: &mut GrpcServerConn,
         _req: HelloRequest,
-        mut responses: ResponseSink<'_, HelloReply>,
-    ) -> Result<(), Status> {
-        let mut i = 0usize;
-        loop {
+    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + use<>, Status> {
+        // A forever-stream that sleeps between frames; shutdown cuts it via the
+        // body's cancel signal.
+        Ok(futures_lite::stream::unfold(0usize, |i| async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            responses
-                .send(HelloReply {
+            Some((
+                Ok(HelloReply {
                     message: format!("msg {i}"),
-                })
-                .await?;
-            i += 1;
-        }
+                }),
+                i + 1,
+            ))
+        }))
     }
 
-    async fn say_hello_many(
-        &self,
-        _reqs: RequestStream<'_, HelloRequest>,
-    ) -> Result<HelloReply, Status> {
+    async fn say_hello_many(&self, _conn: &mut GrpcServerConn) -> Result<HelloReply, Status> {
         std::future::pending::<()>().await;
         unreachable!()
     }
 
     async fn say_hello_chat(
         &self,
-        mut channel: Channel<'_, HelloRequest, HelloReply>,
-    ) -> Result<(), Status> {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            channel
-                .send(HelloReply {
-                    message: "tick".into(),
-                })
-                .await?;
-        }
+        _conn: &mut GrpcServerConn,
+    ) -> Result<impl BidiResponder<HelloRequest, HelloReply> + use<>, Status> {
+        Ok(SleepyChat)
     }
 }
 

@@ -1,0 +1,32 @@
+# Known-failing conformance cases for the trillium-grpc client-under-test.
+#
+# A single limitation fails deterministically, in both its TLS and non-TLS variants:
+#
+# - nonexistent-http-status-code: trillium-http can't surface an unknown HTTP
+#   status (its Status type can't carry an unrecognized code) — it aborts the
+#   connection, so we report unavailable instead of the expected unknown. Parked
+#   until a trillium-http breaking-change window.
+#
+# Every other case passes, and the full concurrent run is now stable run-to-run.
+#
+# Closed since the prior pass: the rotating "empty trailers → Unknown" flake
+# (empty-response, ok-but-no-response, trailers-at-end, error-with-metadata, etc.).
+# It was NOT environmental contention — it was a trillium-http bug: an h2 response
+# carrying content-length ended the body on the declared length, before the trailing
+# HEADERS (grpc-status) arrived, so trailers were dropped. The Go reference server
+# sets content-length on buffered unary/client-stream responses, so those shapes lost
+# the race under TLS/load. Fixed in trillium-http (the Raw body now ends on END_STREAM,
+# not content-length); regression test in trillium-http
+# h2::acceptor::tests::client::content_length_response_defers_eof_until_end_stream_so_trailers_survive.
+#
+# (Separately: sharing one Client across concurrent calls trips a trillium-client
+# h2 stream-id-ordering bug — see tests/client_conn.rs ignored repro — but the
+# harness uses a fresh client per case, so conformance never hits it.)
+#
+# Closed earlier: the full-duplex bidi "error-no-responses" cluster (trillium-http
+# trailer fix), both trailers-only ignore-header cases (head grpc-status now treated
+# as Trailers-Only), the unexpected-codec / unexpected-content-type error-code
+# mappings, unary/client-stream multiple-responses (cardinality), and the
+# cancel-after-close-send cases (cancel now preempts a buffered response).
+Unexpected Responses/HTTPVersion:2/Protocol:PROTOCOL_GRPC/TLS:false/nonexistent-http-status-code
+Unexpected Responses/HTTPVersion:2/Protocol:PROTOCOL_GRPC/TLS:true/nonexistent-http-status-code

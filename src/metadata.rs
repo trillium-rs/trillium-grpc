@@ -9,7 +9,9 @@
 //! `trillium::Headers`. It backs [`Status::metadata`](crate::Status::metadata),
 //! the trailing metadata sent alongside an error status.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+// gRPC `-bin` metadata values are base64 *without* padding; padded values are
+// rejected by spec-conformant peers (e.g. the connectrpc conformance runner).
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD as BASE64};
 use trillium::Headers;
 
 /// An ordered, multi-valued map of custom gRPC metadata. Keys may repeat;

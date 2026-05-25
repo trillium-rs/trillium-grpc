@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use trillium::{Conn, Handler, Method, Upgrade};
 use trillium_grpc::{
-    Channel, Client, Prost, RequestStream, ResponseSink, Server, ServiceClient, Status,
-    Stream, prepare_grpc_conn,
+    BidiConn, BidiResponder, GrpcServerConn, Prost, Server, ServiceClient, Status,
+    Stream, StreamingConn, UnaryConn, prepare_grpc_conn,
 };
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HelloRequest {
@@ -17,21 +17,29 @@ pub struct HelloReply {
 pub trait Greeter: Send + Sync + 'static {
     fn say_hello(
         &self,
+        conn: &mut GrpcServerConn,
         request: HelloRequest,
     ) -> impl Future<Output = Result<HelloReply, Status>> + Send;
     fn say_hello_stream(
         &self,
+        conn: &mut GrpcServerConn,
         request: HelloRequest,
-        responses: ResponseSink<'_, HelloReply>,
-    ) -> impl Future<Output = Result<(), Status>> + Send;
+    ) -> impl Future<
+        Output = Result<
+            impl Stream<Item = Result<HelloReply, Status>> + Send + use<Self>,
+            Status,
+        >,
+    > + Send;
     fn say_hello_many(
         &self,
-        requests: RequestStream<'_, HelloRequest>,
+        conn: &mut GrpcServerConn,
     ) -> impl Future<Output = Result<HelloReply, Status>> + Send;
     fn say_hello_chat(
         &self,
-        channel: Channel<'_, HelloRequest, HelloReply>,
-    ) -> impl Future<Output = Result<(), Status>> + Send;
+        conn: &mut GrpcServerConn,
+    ) -> impl Future<
+        Output = Result<impl BidiResponder<HelloRequest, HelloReply> + use<Self>, Status>,
+    > + Send;
 }
 pub struct GreeterServer<T>(Arc<T>);
 impl<T> GreeterServer<T> {
@@ -39,6 +47,7 @@ impl<T> GreeterServer<T> {
         Self(Arc::new(inner))
     }
 }
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy)]
 enum GreeterDispatch {
     SayHello,
@@ -66,40 +75,44 @@ impl<T: Greeter> Handler for GreeterServer<T> {
             Ok(c) => c,
             Err(c) => return c,
         };
-        conn.with_state(dispatch).upgrade().halt()
-    }
-    fn has_upgrade(&self, upgrade: &Upgrade) -> bool {
-        upgrade.state().get::<GreeterDispatch>().is_some()
-    }
-    async fn upgrade(&self, mut upgrade: Upgrade) {
-        let dispatch = upgrade.state_mut().take::<GreeterDispatch>().unwrap();
         let inner = Arc::clone(&self.0);
         match dispatch {
             GreeterDispatch::SayHello => {
-                Prost::unary(upgrade, async move |req| inner.say_hello(req).await).await
+                Prost::unary(
+                        conn,
+                        async move |grpc, req| inner.say_hello(grpc, req).await,
+                    )
+                    .await
             }
             GreeterDispatch::SayHelloStream => {
                 Prost::server_streaming(
-                        upgrade,
-                        async move |req, sink| inner.say_hello_stream(req, sink).await,
+                        conn,
+                        async move |grpc, req| inner.say_hello_stream(grpc, req).await,
                     )
                     .await
             }
             GreeterDispatch::SayHelloMany => {
                 Prost::client_streaming(
-                        upgrade,
-                        async move |reqs| inner.say_hello_many(reqs).await,
+                        conn,
+                        async move |grpc| inner.say_hello_many(grpc).await,
                     )
                     .await
             }
             GreeterDispatch::SayHelloChat => {
-                Prost::bidi(
-                        upgrade,
-                        async move |channel| inner.say_hello_chat(channel).await,
-                    )
+                Prost::bidi::<
+                    HelloRequest,
+                    HelloReply,
+                    _,
+                >(conn, async move |grpc| inner.say_hello_chat(grpc).await)
                     .await
             }
         }
+    }
+    fn has_upgrade(&self, upgrade: &Upgrade) -> bool {
+        trillium_grpc::has_bidi_upgrade(upgrade)
+    }
+    async fn upgrade(&self, upgrade: Upgrade) {
+        trillium_grpc::drive_bidi_upgrade(upgrade).await;
     }
 }
 pub struct GreeterClient(trillium_client::Client);
@@ -117,31 +130,25 @@ impl ServiceClient for GreeterClient {
     }
 }
 impl GreeterClient {
-    pub async fn say_hello(&self, request: HelloRequest) -> Result<HelloReply, Status> {
-        Prost::unary_call(&self.0, "SayHello", request).await
-    }
-    pub async fn say_hello_stream(
+    pub fn say_hello(
         &self,
         request: HelloRequest,
-    ) -> Result<
-        impl Stream<Item = Result<HelloReply, Status>> + Send + 'static,
-        Status,
-    > {
-        Prost::server_streaming_call(&self.0, "SayHelloStream", request).await
+    ) -> UnaryConn<HelloRequest, HelloReply> {
+        UnaryConn::unary::<Prost>(&self.0, "SayHello", request)
     }
-    pub async fn say_hello_many(
+    pub fn say_hello_stream(
+        &self,
+        request: HelloRequest,
+    ) -> StreamingConn<HelloRequest, HelloReply> {
+        StreamingConn::server_streaming::<Prost>(&self.0, "SayHelloStream", request)
+    }
+    pub fn say_hello_many(
         &self,
         requests: impl Stream<Item = HelloRequest> + Send + 'static,
-    ) -> Result<HelloReply, Status> {
-        Prost::client_streaming_call(&self.0, "SayHelloMany", requests).await
+    ) -> UnaryConn<HelloRequest, HelloReply> {
+        UnaryConn::client_streaming::<Prost>(&self.0, "SayHelloMany", requests)
     }
-    pub async fn say_hello_chat(
-        &self,
-        requests: impl Stream<Item = HelloRequest> + Send + 'static,
-    ) -> Result<
-        impl Stream<Item = Result<HelloReply, Status>> + Send + 'static,
-        Status,
-    > {
-        Prost::bidi_call(&self.0, "SayHelloChat", requests).await
+    pub fn say_hello_chat(&self) -> BidiConn<HelloRequest, HelloReply> {
+        BidiConn::bidi::<Prost>(&self.0, "SayHelloChat")
     }
 }

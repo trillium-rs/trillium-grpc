@@ -1,0 +1,7 @@
+# Known-failing conformance cases for the trillium-grpc server-under-test.
+#
+# None. All 324 cases (all four call shapes, including bidi-stream) pass — the
+# bidi prologue + BidiResponder redesign (PLAN task #10) closed the last gap.
+# This file is kept (empty) so the `--known-failing @config/grpc-known-failing.txt`
+# invocation in the README still resolves; add a leaf pattern here if a future
+# change regresses a case you intend to track rather than fix immediately.

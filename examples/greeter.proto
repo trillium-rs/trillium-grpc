@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package greeter.v1;
+
+service Greeter {
+  // Unary: one request, one response.
+  rpc SayHello (HelloRequest) returns (HelloReply);
+
+  // Server-streaming: one request, a stream of responses.
+  rpc SayHelloStream (HelloRequest) returns (stream HelloReply);
+
+  // Client-streaming: a stream of requests, one response.
+  rpc SayHelloMany (stream HelloRequest) returns (HelloReply);
+
+  // Bidirectional-streaming: a stream of requests, a stream of responses.
+  rpc SayHelloChat (stream HelloRequest) returns (stream HelloReply);
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}

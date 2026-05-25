@@ -19,6 +19,29 @@ on `trillium-http`'s HTTP/2 / h2c / HTTP/3 support. Supports all four call shape
 server-streaming, client-streaming, bidirectional), protobuf and optional JSON codecs, and
 per-message compression.
 
+You write a `.proto`; codegen produces the [`prost`](https://docs.rs/prost) message types, a
+service trait you implement, a server handler that mounts into a trillium handler chain, and a
+typed client. There are three ways to run codegen — the `trillium grpc` CLI (output committed to
+your tree), the `generate!` macro, or a build script — all producing the same service code.
+
+```rust,ignore
+impl Greeter for MyGreeter {
+    async fn say_hello(
+        &self,
+        _conn: &mut GrpcServerConn,
+        request: HelloRequest,
+    ) -> Result<HelloReply, Status> {
+        Ok(HelloReply { message: format!("Hello, {}", request.name) })
+    }
+}
+
+trillium_tokio::run(GreeterServer::new(MyGreeter));
+```
+
+See the [API documentation](https://docs.rs/trillium-grpc) for the full guide, and
+[`examples/greeter.rs`](examples/greeter.rs) for a complete, runnable server and client covering
+all four shapes (`cargo run --example greeter --features macros`).
+
 ## License
 
 <sup>

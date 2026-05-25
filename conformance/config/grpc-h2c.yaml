@@ -1,0 +1,18 @@
+# Conformance feature set for the trillium-grpc server-under-test.
+#
+# gRPC over HTTP/2 with the protobuf codec and identity/gzip compression, both
+# cleartext (h2c) and over TLS (the runner exercises both when supportsTls is
+# true). No Connect or gRPC-Web, no per-request message-receive limit.
+features:
+  versions:
+    - HTTP_VERSION_2
+  protocols:
+    - PROTOCOL_GRPC
+  codecs:
+    - CODEC_PROTO
+  compressions:
+    - COMPRESSION_IDENTITY
+    - COMPRESSION_GZIP
+  supportsTls: true
+  supportsHalfDuplexBidiOverHttp1: false
+  supportsMessageReceiveLimit: false

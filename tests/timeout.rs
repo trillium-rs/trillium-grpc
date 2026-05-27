@@ -20,7 +20,23 @@ use crate::greeter_v1::{Greeter, GreeterClient, GreeterServer, HelloReply, Hello
 use crate::proto::greeter_client::GreeterClient as TonicGreeter;
 use futures_lite::StreamExt;
 use std::time::Duration;
-use trillium_grpc::{Channel, Code, RequestStream, ResponseSink, ServiceClientExt, Status};
+use trillium_grpc::{
+    BidiResponder, Channel, Code, GrpcServerConn, ServiceClientExt, Status, Stream,
+};
+
+/// Bidi responder: echo each request's name straight back.
+struct EchoChat;
+impl BidiResponder<HelloRequest, HelloReply> for EchoChat {
+    async fn respond(
+        self,
+        mut channel: Channel<'_, HelloRequest, HelloReply>,
+    ) -> Result<(), Status> {
+        while let Some(req) = channel.recv().await {
+            channel.send(HelloReply { message: req?.name }).await?;
+        }
+        Ok(())
+    }
+}
 
 /// Greeter whose `say_hello` blocks for the duration encoded in
 /// `name = "sleep:<ms>"`. Other shapes return immediately so we can vary
@@ -33,7 +49,11 @@ fn parse_sleep(name: &str) -> Option<Duration> {
 }
 
 impl Greeter for SlowGreeter {
-    async fn say_hello(&self, req: HelloRequest) -> Result<HelloReply, Status> {
+    async fn say_hello(
+        &self,
+        _conn: &mut GrpcServerConn,
+        req: HelloRequest,
+    ) -> Result<HelloReply, Status> {
         if req.name == "synth-deadline" {
             return Err(Status::deadline_exceeded("synthetic"));
         }
@@ -47,32 +67,34 @@ impl Greeter for SlowGreeter {
 
     async fn say_hello_stream(
         &self,
+        _conn: &mut GrpcServerConn,
         req: HelloRequest,
-        mut responses: ResponseSink<'_, HelloReply>,
-    ) -> Result<(), Status> {
-        // Per-message sleep before yielding, so a streaming response can
-        // be cut by an in-flight deadline.
+    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + use<>, Status> {
+        // Per-message sleep before yielding, so a streaming response can be cut
+        // by an in-flight deadline (StreamBody polls the cancel signal between
+        // frames).
         let delay = parse_sleep(&req.name).unwrap_or_default();
-        for i in 0..5 {
+        Ok(futures_lite::stream::unfold(0usize, move |i| async move {
+            if i >= 5 {
+                return None;
+            }
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
-            responses
-                .send(HelloReply {
+            Some((
+                Ok(HelloReply {
                     message: format!("msg {i}"),
-                })
-                .await?;
-        }
-        Ok(())
+                }),
+                i + 1,
+            ))
+        }))
     }
 
-    async fn say_hello_many(
-        &self,
-        mut reqs: RequestStream<'_, HelloRequest>,
-    ) -> Result<HelloReply, Status> {
+    async fn say_hello_many(&self, conn: &mut GrpcServerConn) -> Result<HelloReply, Status> {
         let mut names = Vec::new();
-        while let Some(req) = reqs.next().await {
-            names.push(req?.name);
+        let mut reqs = conn.requests::<HelloRequest>();
+        while let Some(req) = reqs.recv().await? {
+            names.push(req.name);
         }
         Ok(HelloReply {
             message: names.join(","),
@@ -81,12 +103,9 @@ impl Greeter for SlowGreeter {
 
     async fn say_hello_chat(
         &self,
-        mut channel: Channel<'_, HelloRequest, HelloReply>,
-    ) -> Result<(), Status> {
-        while let Some(req) = channel.recv().await {
-            channel.send(HelloReply { message: req?.name }).await?;
-        }
-        Ok(())
+        _conn: &mut GrpcServerConn,
+    ) -> Result<impl BidiResponder<HelloRequest, HelloReply> + use<>, Status> {
+        Ok(EchoChat)
     }
 }
 
@@ -120,6 +139,8 @@ async fn untimed_call_still_works() {
             name: "world".into(),
         })
         .await
+        .unwrap()
+        .into_message()
         .unwrap();
     assert_eq!(resp.message, "Hello, world");
 
@@ -133,11 +154,15 @@ async fn client_deadline_expires_returns_deadline_exceeded() {
     let (server, port) = start_server!();
     let greeter = our_client(port).with_default_timeout(Duration::from_millis(50));
 
+    // The deadline can fire while awaiting the head or while reading the body, so
+    // fold both stages: `and_then` carries an `await` error through, else runs
+    // `into_message`.
     let err = greeter
         .say_hello(HelloRequest {
             name: "sleep:500".into(),
         })
         .await
+        .and_then(|conn| conn.into_message())
         .unwrap_err();
 
     assert_eq!(err.code, Code::DeadlineExceeded);
@@ -157,6 +182,8 @@ async fn client_deadline_with_room_to_spare_completes() {
             name: "sleep:50".into(),
         })
         .await
+        .unwrap()
+        .into_message()
         .unwrap();
     assert_eq!(resp.message, "Hello, sleep:50");
 

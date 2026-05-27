@@ -1,19 +1,20 @@
 //! The client half of trillium-grpc.
 //!
-//! A generated `<Service>Client` wraps a [`trillium_client::Client`] and
-//! exposes one async method per RPC. Each method calls through the [`Client`]
-//! dispatch trait, which encodes the request, opens an HTTP/2 stream, and reads
-//! the response and its `grpc-status` trailers back. Streaming responses arrive
-//! as a [`ResponseStream`]. Per-client configuration (compression, deadlines)
-//! lives on [`ServiceClientExt`].
+//! A generated `<Service>Client` wraps a [`trillium_client::Client`] and exposes
+//! one method per RPC. Each returns a typed, shape-specific call handle —
+//! [`UnaryConn`], [`StreamingConn`], or [`BidiConn`] — built on the
+//! [`GrpcClientConn`] engine: configure it with chainable `with_*` setters, then
+//! `.await` and/or iterate it to run the call and read the response, its initial
+//! metadata, and its `grpc-status` trailers. Per-client configuration
+//! (compression, deadlines) lives on [`ServiceClientExt`].
 
-mod dispatch;
-mod response_stream;
+mod conn;
 mod service_client;
+mod typed;
 
-pub use dispatch::Client;
-pub use response_stream::ResponseStream;
+pub use conn::{CancelHandle, GrpcClientConn};
 pub use service_client::{ServiceClient, ServiceClientExt};
+pub use typed::{BidiConn, StreamingConn, UnaryConn};
 
 /// Append a service-prefix segment to the client's base URL. Used by
 /// generated `From<trillium_client::Client>` impls so that each generated

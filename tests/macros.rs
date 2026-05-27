@@ -7,12 +7,24 @@
 trillium_grpc::generate!("tests/proto/greeter.proto");
 
 use greeter::v1::{Greeter, GreeterClient, GreeterServer, HelloReply, HelloRequest};
-use trillium_grpc::Status;
+use trillium_grpc::{BidiResponder, Channel, GrpcServerConn, Status, Stream};
 
 struct MyGreeter;
 
+/// Bidi responder that does nothing — just exercises the macro-generated shape.
+struct NoopChat;
+impl BidiResponder<HelloRequest, HelloReply> for NoopChat {
+    async fn respond(self, _channel: Channel<'_, HelloRequest, HelloReply>) -> Result<(), Status> {
+        Ok(())
+    }
+}
+
 impl Greeter for MyGreeter {
-    async fn say_hello(&self, req: HelloRequest) -> Result<HelloReply, Status> {
+    async fn say_hello(
+        &self,
+        _conn: &mut GrpcServerConn,
+        req: HelloRequest,
+    ) -> Result<HelloReply, Status> {
         Ok(HelloReply {
             message: format!("Hello, {}", req.name),
         })
@@ -20,24 +32,21 @@ impl Greeter for MyGreeter {
 
     async fn say_hello_stream(
         &self,
+        _conn: &mut GrpcServerConn,
         _req: HelloRequest,
-        _responses: trillium_grpc::ResponseSink<'_, HelloReply>,
-    ) -> Result<(), Status> {
-        Ok(())
+    ) -> Result<impl Stream<Item = Result<HelloReply, Status>> + Send + use<>, Status> {
+        Ok(futures_lite::stream::empty())
     }
 
-    async fn say_hello_many(
-        &self,
-        _reqs: trillium_grpc::RequestStream<'_, HelloRequest>,
-    ) -> Result<HelloReply, Status> {
+    async fn say_hello_many(&self, _conn: &mut GrpcServerConn) -> Result<HelloReply, Status> {
         Ok(HelloReply::default())
     }
 
     async fn say_hello_chat(
         &self,
-        _channel: trillium_grpc::Channel<'_, HelloRequest, HelloReply>,
-    ) -> Result<(), Status> {
-        Ok(())
+        _conn: &mut GrpcServerConn,
+    ) -> Result<impl BidiResponder<HelloRequest, HelloReply> + use<>, Status> {
+        Ok(NoopChat)
     }
 }
 
@@ -60,6 +69,8 @@ async fn unary_roundtrip_through_macro_generated_code() {
             name: "world".into(),
         })
         .await
+        .unwrap()
+        .into_message()
         .unwrap();
     assert_eq!(resp.message, "Hello, world");
 

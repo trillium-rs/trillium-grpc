@@ -241,30 +241,49 @@ struct TrilliumServiceGenerator {
 /// Drives the `use trillium_grpc::{...}` block at the top of the module.
 #[derive(Default)]
 struct Needs {
-    /// `impl Stream<...>` shows up in client-streaming/bidi client *inputs*
-    /// and server-streaming/bidi client *outputs*.
+    /// `impl Stream<...>` shows up in client-streaming/bidi client *inputs*,
+    /// server-streaming/bidi client *outputs*, and the server-streaming
+    /// server-side return.
     stream: bool,
-    /// `RequestStream<'_, Req>` — client-streaming server-side parameter.
-    request_stream: bool,
-    /// `ResponseSink<'_, Resp>` — server-streaming server-side parameter.
-    response_sink: bool,
-    /// `Channel<'_, Req, Resp>` — bidi server-side parameter.
-    channel: bool,
+    /// `GrpcServerConn` — the control surface every server method receives (the three
+    /// half-duplex shapes and the bidi prologue).
+    grpc_conn: bool,
+    /// `BidiResponder<Req, Resp>` — the bidi prologue's return type. Also implies
+    /// the `trillium::Upgrade` import (bidi is the only shape that upgrades).
+    bidi: bool,
+    /// `UnaryConn` — the client return type for unary and client-streaming RPCs.
+    unary_conn: bool,
+    /// `StreamingConn` — the client return type for server-streaming RPCs.
+    streaming_conn: bool,
+    /// `BidiConn` — the client return type for bidi RPCs.
+    bidi_conn: bool,
 }
 
 impl ServiceGenerator for TrilliumServiceGenerator {
     fn generate(&mut self, service: Service, buf: &mut String) {
         self.services_in_package += 1;
         for m in &service.methods {
-            if m.server_streaming || m.client_streaming {
-                self.needs.stream = true;
-            }
+            // `impl Stream` appears only in the half-streaming shapes:
+            // client-streaming's client *input* and server-streaming's server
+            // trait *return*. Bidi uses BidiResponder/BidiConn, unary neither.
             match (m.client_streaming, m.server_streaming) {
-                (false, true) => self.needs.response_sink = true,
-                (true, false) => self.needs.request_stream = true,
-                (true, true) => self.needs.channel = true,
-                (false, false) => {}
+                (false, false) => self.needs.unary_conn = true,
+                (true, false) => {
+                    self.needs.unary_conn = true;
+                    self.needs.stream = true;
+                }
+                (false, true) => {
+                    self.needs.streaming_conn = true;
+                    self.needs.stream = true;
+                }
+                (true, true) => {
+                    self.needs.bidi = true;
+                    self.needs.bidi_conn = true;
+                }
             }
+            // Every server method — including the bidi prologue — receives a
+            // `&mut GrpcServerConn`.
+            self.needs.grpc_conn = true;
         }
         let trait_def = render_trait(&service);
         let server_def = render_server(&service);
@@ -291,35 +310,45 @@ impl ServiceGenerator for TrilliumServiceGenerator {
 /// prelude and don't need importing; streaming types are imported only when
 /// the service actually references them.
 ///
-/// Note: `Client` here is the trillium-grpc dispatch trait (in scope so
-/// `Prost::*_call` resolves through it); `trillium_client::Client` (the
-/// connection-pool struct) is referenced fully-qualified in generated
-/// types to avoid the name collision.
+/// `trillium_client::Client` (the connection-pool struct) is referenced
+/// fully-qualified in generated types, so it isn't imported here.
 fn render_imports(needs: &Needs) -> String {
     let mut grpc_items: Vec<&str> = vec![
-        "Client",
         "Prost",
         "Server",
         "ServiceClient",
         "Status",
         "prepare_grpc_conn",
     ];
-    if needs.request_stream {
-        grpc_items.push("RequestStream");
+    if needs.grpc_conn {
+        grpc_items.push("GrpcServerConn");
     }
-    if needs.response_sink {
-        grpc_items.push("ResponseSink");
-    }
-    if needs.channel {
-        grpc_items.push("Channel");
+    if needs.bidi {
+        grpc_items.push("BidiResponder");
     }
     if needs.stream {
         grpc_items.push("Stream");
     }
+    if needs.unary_conn {
+        grpc_items.push("UnaryConn");
+    }
+    if needs.streaming_conn {
+        grpc_items.push("StreamingConn");
+    }
+    if needs.bidi_conn {
+        grpc_items.push("BidiConn");
+    }
     grpc_items.sort_unstable();
 
+    // `Upgrade` is only referenced by the bidi handler path (`has_upgrade`).
+    let trillium_items = if needs.bidi {
+        "Conn, Handler, Method, Upgrade"
+    } else {
+        "Conn, Handler, Method"
+    };
+
     format!(
-        "use std::sync::Arc;\nuse trillium::{{Conn, Handler, Method, Upgrade}};\nuse trillium_grpc::{{{}}};\n\n",
+        "use std::sync::Arc;\nuse trillium::{{{trillium_items}}};\nuse trillium_grpc::{{{}}};\n\n",
         grpc_items.join(", ")
     )
 }
@@ -342,35 +371,49 @@ fn render_trait_method(method: &Method) -> proc_macro2::TokenStream {
     let output: syn::Type =
         syn::parse_str(&method.output_type).expect("valid Rust type from prost");
 
-    // For the four call shapes, generate trait signatures that match the
-    // borrowed-primitive dispatch shape: framework owns the upgrade and
-    // hands the user closure RequestStream/ResponseSink/Channel borrows
-    // tied to that lifetime.
+    // The three half-duplex shapes run in `Handler::run` and take a `GrpcServerConn`
+    // control surface (read the request stream via `conn.requests::<Req>()`,
+    // set response metadata via `conn.response_headers_mut()` /
+    // `response_trailers_mut()`). Bidi is the run-phase prologue: it also takes a
+    // `GrpcServerConn` and returns a `BidiResponder` that drives the read-while-write
+    // loop from `Handler::upgrade`. The `use<Self>` keeps the responder from
+    // capturing the `&self` borrow so it stays `'static` across the seam.
     match (method.client_streaming, method.server_streaming) {
         (false, false) => quote! {
             fn #name(
                 &self,
+                conn: &mut GrpcServerConn,
                 request: #input,
             ) -> impl Future<Output = Result<#output, Status>> + Send;
         },
         (false, true) => quote! {
             fn #name(
                 &self,
+                conn: &mut GrpcServerConn,
                 request: #input,
-                responses: ResponseSink<'_, #output>,
-            ) -> impl Future<Output = Result<(), Status>> + Send;
+            ) -> impl Future<
+                Output = Result<
+                    impl Stream<Item = Result<#output, Status>> + Send + use<Self>,
+                    Status,
+                >,
+            > + Send;
         },
         (true, false) => quote! {
             fn #name(
                 &self,
-                requests: RequestStream<'_, #input>,
+                conn: &mut GrpcServerConn,
             ) -> impl Future<Output = Result<#output, Status>> + Send;
         },
         (true, true) => quote! {
             fn #name(
                 &self,
-                channel: Channel<'_, #input, #output>,
-            ) -> impl Future<Output = Result<(), Status>> + Send;
+                conn: &mut GrpcServerConn,
+            ) -> impl Future<
+                Output = Result<
+                    impl BidiResponder<#input, #output> + use<Self>,
+                    Status,
+                >,
+            > + Send;
         },
     }
 }
@@ -395,10 +438,35 @@ fn render_server(service: &Service) -> proc_macro2::TokenStream {
         let v = format_ident!("{}", m.proto_name);
         quote! { #path => #dispatch_name::#v, }
     });
-    let upgrade_match_arms = service
+    let run_arms = service
         .methods
         .iter()
-        .map(|m| render_upgrade_arm(m, &dispatch_name));
+        .map(|m| render_run_arm(m, &dispatch_name));
+
+    let has_bidi = service
+        .methods
+        .iter()
+        .any(|m| m.client_streaming && m.server_streaming);
+
+    // Every run arm forwards to `inner` (the bidi arm runs its prologue too).
+    let run_inner = quote! { let inner = Arc::clone(&self.0); };
+
+    // Only emit the upgrade plumbing when the service has a bidi RPC. Both
+    // hooks are method-independent: the run-phase prologue has already stashed a
+    // type-erased driver in the conn's state, so the upgrade just drives it.
+    let upgrade_impl = if has_bidi {
+        quote! {
+            fn has_upgrade(&self, upgrade: &Upgrade) -> bool {
+                trillium_grpc::has_bidi_upgrade(upgrade)
+            }
+
+            async fn upgrade(&self, upgrade: Upgrade) {
+                trillium_grpc::drive_bidi_upgrade(upgrade).await;
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     quote! {
         pub struct #server_name<T>(Arc<T>);
@@ -409,6 +477,9 @@ fn render_server(service: &Service) -> proc_macro2::TokenStream {
             }
         }
 
+        // Variants mirror the proto's RPC method names, which commonly share a
+        // prefix (e.g. `SayHello`, `SayHelloStream`); we can't rename them.
+        #[allow(clippy::enum_variant_names)]
         #[derive(Debug, Clone, Copy)]
         enum #dispatch_name {
             #(#dispatch_variants,)*
@@ -431,60 +502,62 @@ fn render_server(service: &Service) -> proc_macro2::TokenStream {
                     Ok(c) => c,
                     Err(c) => return c,
                 };
-                conn.with_state(dispatch).upgrade().halt()
-            }
-
-            fn has_upgrade(&self, upgrade: &Upgrade) -> bool {
-                upgrade.state().get::<#dispatch_name>().is_some()
-            }
-
-            async fn upgrade(&self, mut upgrade: Upgrade) {
-                let dispatch = upgrade.state_mut().take::<#dispatch_name>().unwrap();
-                let inner = Arc::clone(&self.0);
+                #run_inner
                 match dispatch {
-                    #(#upgrade_match_arms)*
+                    #(#run_arms)*
                 }
             }
+
+            #upgrade_impl
         }
     }
 }
 
-fn render_upgrade_arm(
-    method: &Method,
-    dispatch_name: &proc_macro2::Ident,
-) -> proc_macro2::TokenStream {
+/// A `run()` match arm. Every shape calls its dispatch fn with the `Conn` and
+/// returns the finished `Conn`. For bidi that dispatch fn is the prologue: it
+/// runs the user's method, and on success stashes a type-erased driver in the
+/// conn's state and marks it for upgrade (driven later from `upgrade()`).
+///
+/// The closures use `async move |...|` (an async closure) rather than
+/// `move |...| async move {...}` because the latter doesn't infer the
+/// higher-ranked `AsyncFnOnce` bound over the `&mut GrpcServerConn` lifetime.
+fn render_run_arm(method: &Method, dispatch_name: &proc_macro2::Ident) -> proc_macro2::TokenStream {
     use quote::{format_ident, quote};
     let v = format_ident!("{}", method.proto_name);
     let rust_name = format_ident!("{}", method.name);
 
-    // Closure shape mirrors the dispatch fn it's handed to. The streaming
-    // shapes use `async move |...|` (an async closure) rather than
-    // `move |...| async move {...}` because the latter doesn't infer a
-    // higher-ranked AsyncFnOnce bound over the borrowed primitive's
-    // lifetime — the returned future ends up tied to a specific lifetime,
-    // and dispatch needs `for<'a> AsyncFnOnce(...<'a>...)`.
-    let (dispatch_method, closure) = match (method.client_streaming, method.server_streaming) {
-        (false, false) => (
-            format_ident!("unary"),
-            quote! { async move |req| inner.#rust_name(req).await },
-        ),
-        (false, true) => (
-            format_ident!("server_streaming"),
-            quote! { async move |req, sink| inner.#rust_name(req, sink).await },
-        ),
-        (true, false) => (
-            format_ident!("client_streaming"),
-            quote! { async move |reqs| inner.#rust_name(reqs).await },
-        ),
-        (true, true) => (
-            format_ident!("bidi"),
-            quote! { async move |channel| inner.#rust_name(channel).await },
-        ),
-    };
-
-    quote! {
-        #dispatch_name::#v => {
-            Prost::#dispatch_method(upgrade, #closure).await
+    match (method.client_streaming, method.server_streaming) {
+        (false, false) => quote! {
+            #dispatch_name::#v => {
+                Prost::unary(conn, async move |grpc, req| inner.#rust_name(grpc, req).await).await
+            }
+        },
+        (false, true) => quote! {
+            #dispatch_name::#v => {
+                Prost::server_streaming(conn, async move |grpc, req| inner.#rust_name(grpc, req).await).await
+            }
+        },
+        (true, false) => quote! {
+            #dispatch_name::#v => {
+                Prost::client_streaming(conn, async move |grpc| inner.#rust_name(grpc).await).await
+            }
+        },
+        (true, true) => {
+            let input: syn::Type =
+                syn::parse_str(&method.input_type).expect("valid Rust type from prost");
+            let output: syn::Type =
+                syn::parse_str(&method.output_type).expect("valid Rust type from prost");
+            // Turbofish pins Req/Resp; only the responder type `R` is inferred
+            // from the prologue closure's return.
+            quote! {
+                #dispatch_name::#v => {
+                    Prost::bidi::<#input, #output, _>(
+                        conn,
+                        async move |grpc| inner.#rust_name(grpc).await,
+                    )
+                    .await
+                }
+            }
         }
     }
 }
@@ -521,6 +594,10 @@ fn render_client(service: &Service) -> proc_macro2::TokenStream {
     }
 }
 
+/// Emit one client method. Each returns a typed conn handle whose surface fits
+/// the RPC's shape — `.await` it (unary / client-streaming), iterate it
+/// (server-streaming), or drive it live (bidi). Construction is synchronous; the
+/// request fires when the handle is awaited or first polled.
 fn render_client_method(method: &Method) -> proc_macro2::TokenStream {
     use quote::{format_ident, quote};
     let name = format_ident!("{}", method.name);
@@ -529,36 +606,29 @@ fn render_client_method(method: &Method) -> proc_macro2::TokenStream {
         syn::parse_str(&method.output_type).expect("valid Rust type from prost");
     let rpc = method.proto_name.as_str();
 
-    let dispatch_method = match (method.client_streaming, method.server_streaming) {
-        (false, false) => format_ident!("unary_call"),
-        (false, true) => format_ident!("server_streaming_call"),
-        (true, false) => format_ident!("client_streaming_call"),
-        (true, true) => format_ident!("bidi_call"),
-    };
-
-    let request_param = if method.client_streaming {
-        quote! { requests: impl Stream<Item = #input> + Send + 'static }
-    } else {
-        quote! { request: #input }
-    };
-
-    let arg = if method.client_streaming {
-        format_ident!("requests")
-    } else {
-        format_ident!("request")
-    };
-
-    let result_ty = if method.server_streaming {
-        quote! {
-            Result<impl Stream<Item = Result<#output, Status>> + Send + 'static, Status>
-        }
-    } else {
-        quote! { Result<#output, Status> }
-    };
-
-    quote! {
-        pub async fn #name(&self, #request_param) -> #result_ty {
-            Prost::#dispatch_method(&self.0, #rpc, #arg).await
-        }
+    match (method.client_streaming, method.server_streaming) {
+        (false, false) => quote! {
+            pub fn #name(&self, request: #input) -> UnaryConn<#input, #output> {
+                UnaryConn::unary::<Prost>(&self.0, #rpc, request)
+            }
+        },
+        (true, false) => quote! {
+            pub fn #name(
+                &self,
+                requests: impl Stream<Item = #input> + Send + 'static,
+            ) -> UnaryConn<#input, #output> {
+                UnaryConn::client_streaming::<Prost>(&self.0, #rpc, requests)
+            }
+        },
+        (false, true) => quote! {
+            pub fn #name(&self, request: #input) -> StreamingConn<#input, #output> {
+                StreamingConn::server_streaming::<Prost>(&self.0, #rpc, request)
+            }
+        },
+        (true, true) => quote! {
+            pub fn #name(&self) -> BidiConn<#input, #output> {
+                BidiConn::bidi::<Prost>(&self.0, #rpc)
+            }
+        },
     }
 }

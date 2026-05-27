@@ -1,13 +1,15 @@
-//! Borrowed streaming primitives handed to user closures by the streaming
-//! dispatch shapes.
+//! Borrowed streaming primitives handed to service methods.
 //!
-//! All three borrow `&'a mut Upgrade` from the dispatch frame. The
-//! framework retains ownership of the upgrade across the user's await
-//! chain; on closure return it writes the terminating `grpc-status`
-//! trailers based on the user's `Result`.
+//! [`RequestStream`] decodes inbound request messages from a boxed reader — the
+//! request body during `run()` (via [`GrpcServerConn::requests`]), and continues
+//! against the same retained body after a bidi upgrade. [`Channel`] is the
+//! bidirectional read+write surface a bidi responder drives over the upgraded
+//! transport.
 //!
-//! Codec is type-erased into `fn` pointers so user-facing types don't carry
-//! a codec parameter.
+//! Codec is type-erased into `fn` pointers so these user-facing types carry no
+//! codec parameter.
+//!
+//! [`GrpcServerConn::requests`]: crate::server::GrpcServerConn::requests
 
 use crate::{
     Encoding, Status,
@@ -18,22 +20,21 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use futures_lite::{AsyncWriteExt, Stream};
+use futures_lite::{AsyncRead, AsyncWriteExt, Stream};
 use std::{
     future::poll_fn,
     pin::Pin,
     task::{Context, Poll},
 };
-use trillium::Upgrade;
+use trillium::{Headers, Upgrade};
 
-/// Stream of decoded request messages over the inbound side of an upgrade.
+/// A stream of decoded request messages.
 ///
-/// Yielded by client-streaming dispatch. Implements
-/// [`futures_lite::Stream`]; `.next()` returns the next decoded message,
-/// `None` on clean EOF, or `Some(Err(_))` for a per-message error (after
-/// which the stream ends).
+/// Produced by [`GrpcServerConn::requests`](crate::server::GrpcServerConn::requests). Read
+/// it with [`recv`](Self::recv) (or as a [`Stream`]); `recv` yields `Ok(None)`
+/// on clean end-of-stream and `Err` on a decode or transport error.
 pub struct RequestStream<'a, T> {
-    upgrade: &'a mut Upgrade,
+    reader: Pin<Box<dyn AsyncRead + Send + 'a>>,
     state: ReadState,
     decode: fn(&[u8]) -> Result<T, Status>,
     encoding: Encoding,
@@ -42,80 +43,67 @@ pub struct RequestStream<'a, T> {
 
 impl<'a, T> RequestStream<'a, T> {
     pub(crate) fn new(
-        upgrade: &'a mut Upgrade,
+        reader: Pin<Box<dyn AsyncRead + Send + 'a>>,
         decode: fn(&[u8]) -> Result<T, Status>,
         encoding: Encoding,
     ) -> Self {
         Self {
-            upgrade,
+            reader,
             state: ReadState::new(),
             decode,
             encoding,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
         }
     }
+
+    fn poll_message(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<T, Status>>> {
+        poll_read_message(
+            self.reader.as_mut(),
+            &mut self.state,
+            cx,
+            self.decode,
+            self.encoding,
+            self.max_message_size,
+        )
+    }
+
+    /// The next decoded request message: `Ok(None)` on clean end-of-stream,
+    /// `Err` on a per-message decode error or transport failure.
+    pub async fn recv(&mut self) -> Result<Option<T>, Status> {
+        poll_fn(|cx| match self.poll_message(cx) {
+            Poll::Ready(Some(Ok(t))) => Poll::Ready(Ok(Some(t))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(e)),
+            Poll::Ready(None) => Poll::Ready(Ok(None)),
+            Poll::Pending => Poll::Pending,
+        })
+        .await
+    }
 }
 
 impl<T: 'static> Stream for RequestStream<'_, T> {
     type Item = Result<T, Status>;
-
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        poll_read_message(
-            Pin::new(&mut *this.upgrade),
-            &mut this.state,
-            cx,
-            this.decode,
-            this.encoding,
-            this.max_message_size,
-        )
+        self.get_mut().poll_message(cx)
     }
 }
 
-/// Sink for response messages over the outbound side of an upgrade.
+/// Bidirectional channel: read decoded requests, write framed responses, over
+/// the upgraded transport.
 ///
-/// Handed to server-streaming dispatch. Each [`send`](Self::send) frames
-/// the value with the negotiated outbound encoding and writes it.
-pub struct ResponseSink<'a, T> {
-    upgrade: &'a mut Upgrade,
-    encode: fn(&T) -> Result<Bytes, Status>,
-    encoding: Encoding,
-}
-
-impl<'a, T> ResponseSink<'a, T> {
-    pub(crate) fn new(
-        upgrade: &'a mut Upgrade,
-        encode: fn(&T) -> Result<Bytes, Status>,
-        encoding: Encoding,
-    ) -> Self {
-        Self {
-            upgrade,
-            encode,
-            encoding,
-        }
-    }
-
-    /// Frame and write one response message. Errors are surfaced as
-    /// `Status::unavailable` for transport failures or whatever the codec
-    /// returns for encode failures.
-    pub async fn send(&mut self, value: T) -> Result<(), Status> {
-        let payload = (self.encode)(&value)?;
-        let frame = encode_payload(&payload, self.encoding)?;
-        self.upgrade
-            .write_all(&frame)
-            .await
-            .map_err(|e| Status::unavailable(format!("write error: {e}")))
-    }
-}
-
-/// Bidirectional channel: read decoded requests, write framed responses.
+/// Handed to a [`BidiResponder`](crate::BidiResponder). Turn-taking by
+/// construction — both [`recv`](Self::recv) and [`send`](Self::send) take
+/// `&mut self`, so the underlying `&mut Upgrade` is never aliased. For producers
+/// that need to run concurrently with the request loop, spawn a task on the
+/// runtime.
 ///
-/// Handed to bidi dispatch. Turn-taking by construction — both
-/// [`recv`](Self::recv) and [`send`](Self::send) take `&mut self`, so the
-/// underlying `&mut Upgrade` is never aliased. For producers that need to
-/// run concurrently with the request loop, spawn a task on the runtime.
+/// The response *initial* metadata was committed before the upgrade (by the
+/// prologue), so there is no way to mutate it here. The *trailing* metadata,
+/// emitted after the loop alongside `grpc-status`, is still open: write it
+/// through [`response_trailers_mut`](Self::response_trailers_mut) (the bag was
+/// seeded with whatever the prologue set).
 pub struct Channel<'a, Req, Resp> {
     upgrade: &'a mut Upgrade,
+    response_trailers: &'a mut Headers,
     state: ReadState,
     decode: fn(&[u8]) -> Result<Req, Status>,
     encode: fn(&Resp) -> Result<Bytes, Status>,
@@ -127,6 +115,7 @@ pub struct Channel<'a, Req, Resp> {
 impl<'a, Req, Resp> Channel<'a, Req, Resp> {
     pub(crate) fn new(
         upgrade: &'a mut Upgrade,
+        response_trailers: &'a mut Headers,
         decode: fn(&[u8]) -> Result<Req, Status>,
         encode: fn(&Resp) -> Result<Bytes, Status>,
         inbound_encoding: Encoding,
@@ -134,6 +123,7 @@ impl<'a, Req, Resp> Channel<'a, Req, Resp> {
     ) -> Self {
         Self {
             upgrade,
+            response_trailers,
             state: ReadState::new(),
             decode,
             encode,
@@ -143,9 +133,16 @@ impl<'a, Req, Resp> Channel<'a, Req, Resp> {
         }
     }
 
-    /// Read the next decoded request. `None` on clean EOF (client closed
-    /// the request side); `Some(Err(_))` ends the read side and further
-    /// calls return `None`.
+    /// The response's trailing metadata, emitted alongside `grpc-status` once
+    /// the loop ends. Seeded with whatever the prologue set; write to it to add
+    /// trailing metadata (including `grpc-status-details-bin` error details)
+    /// from inside the loop.
+    pub fn response_trailers_mut(&mut self) -> &mut Headers {
+        self.response_trailers
+    }
+
+    /// Read the next decoded request. `None` on clean EOF (client closed the
+    /// request side); `Some(Err(_))` ends the read side.
     pub async fn recv(&mut self) -> Option<Result<Req, Status>> {
         let upgrade = &mut *self.upgrade;
         let state = &mut self.state;

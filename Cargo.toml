@@ -3,7 +3,7 @@ members = [".", "codegen", "macros", "conformance"]
 
 [package]
 name = "trillium-grpc"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "gRPC server and client for trillium, built on trillium-http's h2/h2c/h3 support"
 license = "MIT OR Apache-2.0"

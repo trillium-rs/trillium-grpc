@@ -1,0 +1,6 @@
+# Normalize line endings to LF on checkout across all platforms. The codegen
+# golden-file test (tests/codegen.rs) compares the committed
+# tests/generated/*.rs against freshly generated output, which always emits LF;
+# without this, Windows runners with core.autocrlf=true check the file out as
+# CRLF and the byte comparison fails.
+* text=auto eol=lf

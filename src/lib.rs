@@ -46,6 +46,20 @@ pub use server::{
 };
 pub use status::{Code, Status};
 
+/// Re-export of the [`prost`] runtime.
+///
+/// Generated message types derive `::trillium_grpc::prost::Message`, so a crate
+/// that depends only on `trillium-grpc` can use the generated code without a
+/// direct `prost` dependency.
+pub use prost;
+
+/// Re-export of [`trillium_client`].
+///
+/// Generated service clients name [`trillium_client::Client`] through this
+/// re-export, so a crate that depends only on `trillium-grpc` can use a
+/// generated client without a direct `trillium-client` dependency.
+pub use trillium_client;
+
 #[cfg(test)]
 #[doc = include_str!("../README.md")]
 mod readme {}

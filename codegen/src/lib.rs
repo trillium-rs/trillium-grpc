@@ -101,6 +101,9 @@ pub fn generate_from_descriptors(
     opts: &Options,
 ) -> Result<GeneratedFiles, Error> {
     let mut config = Config::new();
+    // Emit message derives as `::trillium_grpc::prost::…` (via trillium-grpc's
+    // re-export) so generated code carries no direct `prost` dependency.
+    config.prost_path("::trillium_grpc::prost");
     config.service_generator(Box::new(TrilliumServiceGenerator::default()));
 
     let requests: Vec<(Module, prost_types::FileDescriptorProto)> = fds
@@ -311,7 +314,9 @@ impl ServiceGenerator for TrilliumServiceGenerator {
 /// the service actually references them.
 ///
 /// `trillium_client::Client` (the connection-pool struct) is referenced
-/// fully-qualified in generated types, so it isn't imported here.
+/// fully-qualified through trillium-grpc's re-export
+/// (`::trillium_grpc::trillium_client::Client`) in generated types, so it isn't
+/// imported here and the consuming crate needs no direct `trillium-client` dep.
 fn render_imports(needs: &Needs) -> String {
     let mut grpc_items: Vec<&str> = vec![
         "Prost",
@@ -575,17 +580,17 @@ fn render_client(service: &Service) -> proc_macro2::TokenStream {
     let methods = service.methods.iter().map(render_client_method);
 
     quote! {
-        pub struct #client_name(trillium_client::Client);
+        pub struct #client_name(::trillium_grpc::trillium_client::Client);
 
-        impl From<trillium_client::Client> for #client_name {
-            fn from(client: trillium_client::Client) -> Self {
+        impl From<::trillium_grpc::trillium_client::Client> for #client_name {
+            fn from(client: ::trillium_grpc::trillium_client::Client) -> Self {
                 Self(trillium_grpc::with_service_prefix(client, #prefix))
             }
         }
 
         impl ServiceClient for #client_name {
-            fn client(&self) -> &trillium_client::Client { &self.0 }
-            fn client_mut(&mut self) -> &mut trillium_client::Client { &mut self.0 }
+            fn client(&self) -> &::trillium_grpc::trillium_client::Client { &self.0 }
+            fn client_mut(&mut self) -> &mut ::trillium_grpc::trillium_client::Client { &mut self.0 }
         }
 
         impl #client_name {

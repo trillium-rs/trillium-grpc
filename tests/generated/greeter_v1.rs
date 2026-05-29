@@ -4,15 +4,17 @@ use trillium_grpc::{
     BidiConn, BidiResponder, GrpcServerConn, Prost, Server, ServiceClient, Status,
     Stream, StreamingConn, UnaryConn, prepare_grpc_conn,
 };
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::trillium_grpc::prost::Message)]
+#[prost(prost_path = "::trillium_grpc::prost")]
 pub struct HelloRequest {
     #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
+    pub name: ::trillium_grpc::prost::alloc::string::String,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::trillium_grpc::prost::Message)]
+#[prost(prost_path = "::trillium_grpc::prost")]
 pub struct HelloReply {
     #[prost(string, tag = "1")]
-    pub message: ::prost::alloc::string::String,
+    pub message: ::trillium_grpc::prost::alloc::string::String,
 }
 pub trait Greeter: Send + Sync + 'static {
     fn say_hello(
@@ -115,17 +117,17 @@ impl<T: Greeter> Handler for GreeterServer<T> {
         trillium_grpc::drive_bidi_upgrade(upgrade).await;
     }
 }
-pub struct GreeterClient(trillium_client::Client);
-impl From<trillium_client::Client> for GreeterClient {
-    fn from(client: trillium_client::Client) -> Self {
+pub struct GreeterClient(::trillium_grpc::trillium_client::Client);
+impl From<::trillium_grpc::trillium_client::Client> for GreeterClient {
+    fn from(client: ::trillium_grpc::trillium_client::Client) -> Self {
         Self(trillium_grpc::with_service_prefix(client, "greeter.v1.Greeter"))
     }
 }
 impl ServiceClient for GreeterClient {
-    fn client(&self) -> &trillium_client::Client {
+    fn client(&self) -> &::trillium_grpc::trillium_client::Client {
         &self.0
     }
-    fn client_mut(&mut self) -> &mut trillium_client::Client {
+    fn client_mut(&mut self) -> &mut ::trillium_grpc::trillium_client::Client {
         &mut self.0
     }
 }

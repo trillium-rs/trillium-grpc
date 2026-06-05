@@ -12,7 +12,6 @@
 
 pub mod bidi;
 mod body;
-pub mod content_type;
 pub mod dispatch;
 mod grpc_conn;
 pub mod streaming;

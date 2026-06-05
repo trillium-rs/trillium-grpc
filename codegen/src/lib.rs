@@ -61,6 +61,14 @@ pub struct Options {
     /// result is fed straight back into the compiler (as the proc-macro path
     /// does), where pretty-printing is wasted work.
     pub format: bool,
+
+    /// Emit the client half — the `<Service>Client` struct and its per-RPC
+    /// call methods. On by default. Turn off for a server-only crate.
+    pub client: bool,
+
+    /// Emit the server half — the service trait and the `<Service>Server<T>`
+    /// handler. On by default. Turn off for a client-only crate.
+    pub server: bool,
 }
 
 impl Default for Options {
@@ -68,6 +76,8 @@ impl Default for Options {
         Self {
             include_paths: Vec::new(),
             format: true,
+            client: true,
+            server: true,
         }
     }
 }
@@ -101,10 +111,11 @@ pub fn generate_from_descriptors(
     opts: &Options,
 ) -> Result<GeneratedFiles, Error> {
     let mut config = Config::new();
-    // Emit message derives as `::trillium_grpc::prost::…` (via trillium-grpc's
-    // re-export) so generated code carries no direct `prost` dependency.
-    config.prost_path("::trillium_grpc::prost");
-    config.service_generator(Box::new(TrilliumServiceGenerator::default()));
+    config.prost_path("prost");
+    config.service_generator(Box::new(TrilliumServiceGenerator::new(
+        opts.client,
+        opts.server,
+    )));
 
     let requests: Vec<(Module, prost_types::FileDescriptorProto)> = fds
         .file
@@ -165,11 +176,17 @@ pub fn configure() -> Builder {
 #[derive(Debug, Clone)]
 pub struct Builder {
     format: bool,
+    client: bool,
+    server: bool,
 }
 
 impl Default for Builder {
     fn default() -> Self {
-        Self { format: true }
+        Self {
+            format: true,
+            client: true,
+            server: true,
+        }
     }
 }
 
@@ -179,6 +196,20 @@ impl Builder {
     /// paid only when the build script actually re-runs.
     pub fn format(mut self, yes: bool) -> Self {
         self.format = yes;
+        self
+    }
+
+    /// Emit the client half (the `<Service>Client` struct and its call
+    /// methods). On by default; turn off for a server-only crate.
+    pub fn client(mut self, yes: bool) -> Self {
+        self.client = yes;
+        self
+    }
+
+    /// Emit the server half (the service trait and `<Service>Server<T>`
+    /// handler). On by default; turn off for a client-only crate.
+    pub fn server(mut self, yes: bool) -> Self {
+        self.server = yes;
         self
     }
 
@@ -213,6 +244,8 @@ impl Builder {
         let opts = Options {
             include_paths: Vec::new(),
             format: self.format,
+            client: self.client,
+            server: self.server,
         };
         let generated = generate_from_descriptors(compiler.file_descriptor_set(), &opts)?;
 
@@ -234,22 +267,38 @@ fn format_rust(src: &str) -> String {
     }
 }
 
-#[derive(Default)]
 struct TrilliumServiceGenerator {
+    /// Emit the client half (`<Service>Client`).
+    client: bool,
+    /// Emit the server half (service trait + `<Service>Server<T>`).
+    server: bool,
     services_in_package: u32,
     needs: Needs,
 }
 
+impl TrilliumServiceGenerator {
+    fn new(client: bool, server: bool) -> Self {
+        Self {
+            client,
+            server,
+            services_in_package: 0,
+            needs: Needs::default(),
+        }
+    }
+}
+
 /// Which trillium-grpc types this package's generated code references.
 /// Drives the `use trillium_grpc::{...}` block at the top of the module.
+/// Stream needs are tracked per side because a single-side emit must import
+/// `Stream` only when *its* half actually uses it.
 #[derive(Default)]
 struct Needs {
-    /// `impl Stream<...>` shows up in client-streaming/bidi client *inputs*,
-    /// server-streaming/bidi client *outputs*, and the server-streaming
-    /// server-side return.
-    stream: bool,
-    /// `GrpcServerConn` — the control surface every server method receives (the three
-    /// half-duplex shapes and the bidi prologue).
+    /// Client-side `impl Stream<...>` — the client-streaming *input*.
+    stream_client: bool,
+    /// Server-side `impl Stream<...>` — the server-streaming trait *return*.
+    stream_server: bool,
+    /// `GrpcServerConn` — the control surface every server method receives (the
+    /// three half-duplex shapes and the bidi prologue).
     grpc_conn: bool,
     /// `BidiResponder<Req, Resp>` — the bidi prologue's return type. Also implies
     /// the `trillium::Upgrade` import (bidi is the only shape that upgrades).
@@ -273,11 +322,11 @@ impl ServiceGenerator for TrilliumServiceGenerator {
                 (false, false) => self.needs.unary_conn = true,
                 (true, false) => {
                     self.needs.unary_conn = true;
-                    self.needs.stream = true;
+                    self.needs.stream_client = true;
                 }
                 (false, true) => {
                     self.needs.streaming_conn = true;
-                    self.needs.stream = true;
+                    self.needs.stream_server = true;
                 }
                 (true, true) => {
                     self.needs.bidi = true;
@@ -288,11 +337,21 @@ impl ServiceGenerator for TrilliumServiceGenerator {
             // `&mut GrpcServerConn`.
             self.needs.grpc_conn = true;
         }
-        let trait_def = render_trait(&service);
-        let server_def = render_server(&service);
-        let client_def = render_client(&service);
+        // Message types are always emitted (both sides need them); the trait +
+        // `Server` are server-only, the `Client` is client-only.
+        let server_def = if self.server {
+            let trait_def = render_trait(&service);
+            let server_def = render_server(&service);
+            quote::quote! { #trait_def #server_def }
+        } else {
+            quote::quote! {}
+        };
+        let client_def = if self.client {
+            render_client(&service)
+        } else {
+            quote::quote! {}
+        };
         let combined = quote::quote! {
-            #trait_def
             #server_def
             #client_def
         };
@@ -301,10 +360,11 @@ impl ServiceGenerator for TrilliumServiceGenerator {
 
     fn finalize_package(&mut self, _package: &str, buf: &mut String) {
         if self.services_in_package > 0 {
-            buf.insert_str(0, &render_imports(&self.needs));
+            buf.insert_str(0, &render_imports(&self.needs, self.client, self.server));
         }
-        // Reset for the next package.
-        *self = Self::default();
+        // Reset per-package accumulators, preserving the client/server config.
+        self.services_in_package = 0;
+        self.needs = Needs::default();
     }
 }
 
@@ -313,47 +373,67 @@ impl ServiceGenerator for TrilliumServiceGenerator {
 /// prelude and don't need importing; streaming types are imported only when
 /// the service actually references them.
 ///
-/// `trillium_client::Client` (the connection-pool struct) is referenced
-/// fully-qualified through trillium-grpc's re-export
-/// (`::trillium_grpc::trillium_client::Client`) in generated types, so it isn't
-/// imported here and the consuming crate needs no direct `trillium-client` dep.
-fn render_imports(needs: &Needs) -> String {
-    let mut grpc_items: Vec<&str> = vec![
-        "Prost",
-        "Server",
-        "ServiceClient",
-        "Status",
-        "prepare_grpc_conn",
-    ];
-    if needs.grpc_conn {
-        grpc_items.push("GrpcServerConn");
+/// The block is partitioned by side: server-only items (`Server`, `Status`,
+/// `GrpcServerConn`, `prepare_grpc_conn`, `BidiResponder`, the `trillium::{…}`
+/// handler types, `std::sync::Arc`) are emitted only when `server`; client-only
+/// items (`ServiceClient`, `trillium_client::Client`, `UnaryConn` /
+/// `StreamingConn` / `BidiConn`) only when `client`. `prost` (message derives)
+/// is always present; `Prost` (the codec) whenever either half is emitted.
+fn render_imports(needs: &Needs, client: bool, server: bool) -> String {
+    let mut grpc_items: Vec<&str> = vec!["prost"];
+    if client || server {
+        grpc_items.push("Prost");
     }
-    if needs.bidi {
-        grpc_items.push("BidiResponder");
+    if server {
+        grpc_items.push("Server");
+        grpc_items.push("Status");
+        grpc_items.push("prepare_grpc_conn");
+        if needs.grpc_conn {
+            grpc_items.push("GrpcServerConn");
+        }
+        if needs.bidi {
+            grpc_items.push("BidiResponder");
+        }
+        if needs.stream_server {
+            grpc_items.push("Stream");
+        }
     }
-    if needs.stream {
-        grpc_items.push("Stream");
-    }
-    if needs.unary_conn {
-        grpc_items.push("UnaryConn");
-    }
-    if needs.streaming_conn {
-        grpc_items.push("StreamingConn");
-    }
-    if needs.bidi_conn {
-        grpc_items.push("BidiConn");
+    if client {
+        grpc_items.push("ServiceClient");
+        grpc_items.push("trillium_client::Client");
+        if needs.unary_conn {
+            grpc_items.push("UnaryConn");
+        }
+        if needs.streaming_conn {
+            grpc_items.push("StreamingConn");
+        }
+        if needs.bidi_conn {
+            grpc_items.push("BidiConn");
+        }
+        // `Stream` may already be present from the server side; the dedup
+        // below collapses the duplicate.
+        if needs.stream_client {
+            grpc_items.push("Stream");
+        }
     }
     grpc_items.sort_unstable();
+    grpc_items.dedup();
 
-    // `Upgrade` is only referenced by the bidi handler path (`has_upgrade`).
-    let trillium_items = if needs.bidi {
-        "Conn, Handler, Method, Upgrade"
+    // The trillium handler types and `Arc` are referenced only by the server's
+    // `Handler` impl. `Upgrade` only by the bidi handler path (`has_upgrade`).
+    let server_preamble = if server {
+        let trillium_items = if needs.bidi {
+            "Conn, Handler, Method, Upgrade"
+        } else {
+            "Conn, Handler, Method"
+        };
+        format!("use std::sync::Arc;\nuse trillium::{{{trillium_items}}};\n")
     } else {
-        "Conn, Handler, Method"
+        String::new()
     };
 
     format!(
-        "use std::sync::Arc;\nuse trillium::{{{trillium_items}}};\nuse trillium_grpc::{{{}}};\n\n",
+        "{server_preamble}use trillium_grpc::{{{}}};\n\n",
         grpc_items.join(", ")
     )
 }
@@ -580,17 +660,17 @@ fn render_client(service: &Service) -> proc_macro2::TokenStream {
     let methods = service.methods.iter().map(render_client_method);
 
     quote! {
-        pub struct #client_name(::trillium_grpc::trillium_client::Client);
+        pub struct #client_name(Client);
 
-        impl From<::trillium_grpc::trillium_client::Client> for #client_name {
-            fn from(client: ::trillium_grpc::trillium_client::Client) -> Self {
+        impl From<Client> for #client_name {
+            fn from(client: Client) -> Self {
                 Self(trillium_grpc::with_service_prefix(client, #prefix))
             }
         }
 
         impl ServiceClient for #client_name {
-            fn client(&self) -> &::trillium_grpc::trillium_client::Client { &self.0 }
-            fn client_mut(&mut self) -> &mut ::trillium_grpc::trillium_client::Client { &mut self.0 }
+            fn client(&self) -> &Client { &self.0 }
+            fn client_mut(&mut self) -> &mut Client { &mut self.0 }
         }
 
         impl #client_name {

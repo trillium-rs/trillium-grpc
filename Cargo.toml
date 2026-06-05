@@ -3,7 +3,7 @@ members = [".", "codegen", "macros", "conformance"]
 
 [package]
 name = "trillium-grpc"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "gRPC server and client for trillium, built on trillium-http's h2/h2c/h3 support"
 license = "MIT OR Apache-2.0"
@@ -14,7 +14,9 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["gzip"]
+default = ["client", "server", "gzip"]
+client = ["dep:trillium-client", "dep:async-channel"]
+server = ["dep:sync_wrapper"]
 json = ["dep:serde", "dep:serde_json"]
 gzip = ["dep:flate2"]
 deflate = ["dep:flate2"]
@@ -28,26 +30,51 @@ required-features = ["codegen"]
 
 [[test]]
 name = "macros"
-required-features = ["macros"]
+required-features = ["macros", "client", "server"]
+
+# Round-trip integration tests exercise both generated halves.
+[[test]]
+name = "cancellation"
+required-features = ["client", "server"]
+
+[[test]]
+name = "client_conn"
+required-features = ["client", "server"]
+
+[[test]]
+name = "client_roundtrip"
+required-features = ["client", "server"]
+
+[[test]]
+name = "tonic_roundtrip"
+required-features = ["client", "server"]
+
+[[test]]
+name = "timeout"
+required-features = ["client", "server"]
 
 [[example]]
 name = "greeter"
-required-features = ["macros"]
+required-features = ["macros", "client", "server"]
 
 [dependencies]
-trillium = "1.2.0"
-trillium-http = "1.3.0"
-trillium-client = "0.9"
+trillium = "1.3.0"
+trillium-http = "1.3.4"
 trillium-server-common = "0.7"
 prost = "0.14"
 bytes = "1"
 futures-lite = "2"
 thiserror = "2"
 pin-project-lite = "0.2"
-async-channel = "2"
-sync_wrapper = "1"
 base64 = "0.22"
 log = "0.4"
+
+# client-only
+trillium-client = { version = "0.9", optional = true }
+async-channel = { version = "2", optional = true }
+
+# server-only
+sync_wrapper = { version = "1", optional = true }
 
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
@@ -55,12 +82,12 @@ serde_json = { version = "1", optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 
-trillium-grpc-codegen = { version = "0.2", path = "codegen", optional = true }
-trillium-grpc-macros = { version = "0.2", path = "macros", optional = true }
+trillium-grpc-codegen = { version = "0.3", path = "codegen", optional = true }
+trillium-grpc-macros = { version = "0.3", path = "macros", optional = true }
 
 [dev-dependencies]
 futures-lite = "2"
-trillium-tokio = "0.6.1"
+trillium-tokio = "0.6.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-stream = "0.1"
 tonic = { version = "0.14", features = ["gzip"] }

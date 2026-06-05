@@ -1,12 +1,13 @@
 //! Proc-macro front-end for [`trillium_grpc_codegen`].
 //!
-//! Exposes a single macro, [`generate!`], which reads one or more `.proto`
-//! files at compile time, runs the same codegen used by the `trillium grpc
-//! codegen` CLI, and inlines the result into the call site. The shape of
-//! the inlined output mirrors the `<package>.rs` files the CLI would have
-//! written: one `pub mod <segment> { … }` per dotted segment of each
-//! package, merged into a single tree so packages that share a prefix
-//! collapse into the same outer module.
+//! Exposes three macros — [`generate!`], [`generate_client!`], and
+//! [`generate_server!`] — which read one or more `.proto` files at compile
+//! time, run the same codegen used by the `trillium grpc codegen` CLI, and
+//! inline the result into the call site. The shape of the inlined output
+//! mirrors the `<package>.rs` files the CLI would have written: one
+//! `pub mod <segment> { … }` per dotted segment of each package, merged into a
+//! single tree so packages that share a prefix collapse into the same outer
+//! module.
 //!
 //! ```ignore
 //! trillium_grpc::generate!("proto/greeter.proto");
@@ -14,10 +15,22 @@
 //! // pub mod greeter { pub mod v1 { /* trait + Server + Client + messages */ } }
 //! ```
 //!
+//! [`generate!`] emits both halves; [`generate_client!`] emits only the
+//! `<Service>Client`, and [`generate_server!`] only the service trait +
+//! `<Service>Server<T>` (the `prost` message types come along either way).
+//! Selection is per-invocation rather than feature-driven, because cargo
+//! feature unification is global — a crate that is a server for one service
+//! and a client for another can say so site-by-site:
+//!
+//! ```ignore
+//! trillium_grpc::generate_client!("proto/upstream.proto"); // client only
+//! trillium_grpc::generate_server!("proto/greeter.proto");  // server only
+//! ```
+//!
 //! Paths are resolved relative to the consuming crate's `CARGO_MANIFEST_DIR`
 //! (the directory containing its `Cargo.toml`); absolute paths are accepted
 //! verbatim. To force cargo to re-expand the macro when a `.proto` changes,
-//! the macro emits a `const _: &[u8] = include_bytes!("…")` shim per source
+//! the macros emit a `const _: &[u8] = include_bytes!("…")` shim per source
 //! file alongside the generated code.
 
 use proc_macro::TokenStream;
@@ -43,31 +56,49 @@ impl Parse for Args {
     }
 }
 
-/// Generate trillium-grpc service modules from one or more `.proto` files.
+/// Generate trillium-grpc service modules — both client and server halves —
+/// from one or more `.proto` files.
 ///
 /// Accepts a comma-separated list of string-literal paths. See the crate
 /// docs for details on path resolution and module shape.
 #[proc_macro]
 pub fn generate(input: TokenStream) -> TokenStream {
+    expand_macro(input, true, true)
+}
+
+/// Like [`generate!`], but emits only the client half (`<Service>Client`).
+#[proc_macro]
+pub fn generate_client(input: TokenStream) -> TokenStream {
+    expand_macro(input, true, false)
+}
+
+/// Like [`generate!`], but emits only the server half (service trait +
+/// `<Service>Server<T>`).
+#[proc_macro]
+pub fn generate_server(input: TokenStream) -> TokenStream {
+    expand_macro(input, false, true)
+}
+
+fn expand_macro(input: TokenStream, client: bool, server: bool) -> TokenStream {
     let args = parse_macro_input!(input as Args);
-    match expand(args) {
+    match expand(args, client, server) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-fn expand(args: Args) -> syn::Result<TokenStream2> {
+fn expand(args: Args, client: bool, server: bool) -> syn::Result<TokenStream2> {
     if args.paths.is_empty() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "trillium_grpc::generate! requires at least one .proto path",
+            "trillium-grpc codegen requires at least one .proto path",
         ));
     }
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|_| {
         syn::Error::new(
             Span::call_site(),
-            "CARGO_MANIFEST_DIR not set; trillium_grpc::generate! must run under cargo",
+            "CARGO_MANIFEST_DIR not set; the trillium-grpc generate macros must run under cargo",
         )
     })?;
     let manifest_dir = PathBuf::from(manifest_dir);
@@ -105,6 +136,8 @@ fn expand(args: Args) -> syn::Result<TokenStream2> {
     let opts = trillium_grpc_codegen::Options {
         include_paths: includes,
         format: false,
+        client,
+        server,
     };
 
     let generated = trillium_grpc_codegen::generate_from_proto(&srcs, &opts).map_err(|e| {

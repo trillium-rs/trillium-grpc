@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use trillium::{Conn, Handler, Method, Upgrade};
 use trillium_grpc::{
-    BidiConn, BidiResponder, GrpcServerConn, Prost, Server, ServiceClient, Status,
-    Stream, StreamingConn, UnaryConn, prepare_grpc_conn, prost, trillium_client::Client,
+    BidiResponder, GrpcServerConn, Prost, Server, Status, Stream, prepare_grpc_conn,
+    prost,
 };
 #[derive(Clone, PartialEq, Eq, Hash, prost::Message)]
 #[prost(prost_path = "prost")]
@@ -115,42 +115,5 @@ impl<T: Greeter> Handler for GreeterServer<T> {
     }
     async fn upgrade(&self, upgrade: Upgrade) {
         trillium_grpc::drive_bidi_upgrade(upgrade).await;
-    }
-}
-pub struct GreeterClient(Client);
-impl From<Client> for GreeterClient {
-    fn from(client: Client) -> Self {
-        Self(trillium_grpc::with_service_prefix(client, "greeter.v1.Greeter"))
-    }
-}
-impl ServiceClient for GreeterClient {
-    fn client(&self) -> &Client {
-        &self.0
-    }
-    fn client_mut(&mut self) -> &mut Client {
-        &mut self.0
-    }
-}
-impl GreeterClient {
-    pub fn say_hello(
-        &self,
-        request: HelloRequest,
-    ) -> UnaryConn<HelloRequest, HelloReply> {
-        UnaryConn::unary::<Prost>(&self.0, "SayHello", request)
-    }
-    pub fn say_hello_stream(
-        &self,
-        request: HelloRequest,
-    ) -> StreamingConn<HelloRequest, HelloReply> {
-        StreamingConn::server_streaming::<Prost>(&self.0, "SayHelloStream", request)
-    }
-    pub fn say_hello_many(
-        &self,
-        requests: impl Stream<Item = HelloRequest> + Send + 'static,
-    ) -> UnaryConn<HelloRequest, HelloReply> {
-        UnaryConn::client_streaming::<Prost>(&self.0, "SayHelloMany", requests)
-    }
-    pub fn say_hello_chat(&self) -> BidiConn<HelloRequest, HelloReply> {
-        BidiConn::bidi::<Prost>(&self.0, "SayHelloChat")
     }
 }

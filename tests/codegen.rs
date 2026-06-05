@@ -6,12 +6,34 @@
 use std::path::{Path, PathBuf};
 use trillium_grpc::codegen::{Options, compile_protos, generate_from_proto};
 
-const GENERATED_PATH: &str = "tests/generated/greeter_v1.rs";
+// Compile-coverage for the single-side golden files. Gated on both runtime
+// halves being present (the default), so the golden-text assertions below stay
+// runnable even with `--no-default-features`. When both are on, the client-only
+// module compiles against the client API and the server-only module against the
+// server API — each proving its half references only items that exist.
+#[cfg(all(feature = "client", feature = "server"))]
+#[allow(dead_code)]
+mod greeter_v1_client {
+    include!("generated/greeter_v1_client.rs");
+}
+#[cfg(all(feature = "client", feature = "server"))]
+#[allow(dead_code)]
+mod greeter_v1_server {
+    include!("generated/greeter_v1_server.rs");
+}
 
-#[test]
-fn greeter_v1_matches_committed_output() {
+const GENERATED_PATH: &str = "tests/generated/greeter_v1.rs";
+const GENERATED_CLIENT_PATH: &str = "tests/generated/greeter_v1_client.rs";
+const GENERATED_SERVER_PATH: &str = "tests/generated/greeter_v1_server.rs";
+
+/// Generate the greeter fixture with the given client/server selection and
+/// compare it to the committed golden file. `UPDATE_GENERATED=1` rewrites the
+/// golden in place instead of asserting.
+fn assert_golden(golden_path: &str, client: bool, server: bool) {
     let opts = Options {
         include_paths: vec![PathBuf::from("tests/proto")],
+        client,
+        server,
         ..Options::default()
     };
     let generated = generate_from_proto(&[PathBuf::from("tests/proto/greeter.proto")], &opts)
@@ -23,25 +45,40 @@ fn greeter_v1_matches_committed_output() {
         .expect("greeter.v1.rs in output");
 
     if std::env::var("UPDATE_GENERATED").is_ok() {
-        let path = Path::new(GENERATED_PATH);
+        let path = Path::new(golden_path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, actual).unwrap();
         return;
     }
 
-    let expected = std::fs::read_to_string(GENERATED_PATH).unwrap_or_else(|e| {
+    let expected = std::fs::read_to_string(golden_path).unwrap_or_else(|e| {
         panic!(
-            "could not read {GENERATED_PATH}: {e}. Re-run with \
+            "could not read {golden_path}: {e}. Re-run with \
              UPDATE_GENERATED=1 to bootstrap.",
         );
     });
 
     if actual != &expected {
         panic!(
-            "{GENERATED_PATH} is out of sync with codegen output. \
+            "{golden_path} is out of sync with codegen output. \
              Re-run with UPDATE_GENERATED=1 to update.",
         );
     }
+}
+
+#[test]
+fn greeter_v1_matches_committed_output() {
+    assert_golden(GENERATED_PATH, true, true);
+}
+
+#[test]
+fn greeter_v1_client_only_matches_committed_output() {
+    assert_golden(GENERATED_CLIENT_PATH, true, false);
+}
+
+#[test]
+fn greeter_v1_server_only_matches_committed_output() {
+    assert_golden(GENERATED_SERVER_PATH, false, true);
 }
 
 /// The build-script entry point (`compile_protos`) should write `<package>.rs`

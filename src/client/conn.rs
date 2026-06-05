@@ -708,7 +708,7 @@ fn process_head(conn: &Conn) -> Result<Head, Status> {
         .response_headers()
         .get_str(KnownHeaderName::ContentType);
     if ct
-        .and_then(crate::server::content_type::parse_grpc_content_type)
+        .and_then(crate::content_type::parse_grpc_content_type)
         .is_none()
     {
         // A 200 response whose content-type isn't gRPC means the peer isn't

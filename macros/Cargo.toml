@@ -1,6 +1,6 @@
 [package]
 name = "trillium-grpc-macros"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Proc-macro entry point for trillium-grpc compile-time codegen"
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ repository = "https://github.com/trillium-rs/trillium-grpc"
 proc-macro = true
 
 [dependencies]
-trillium-grpc-codegen = { version = "0.2", path = "../codegen" }
+trillium-grpc-codegen = { version = "0.3", path = "../codegen" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

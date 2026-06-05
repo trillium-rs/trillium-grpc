@@ -11,6 +11,12 @@ and bidirectional-streaming — along with protobuf messages via
 and per-message compression (`gzip` by default, `deflate` and `zstd` behind
 features).
 
+The client and server halves are independently selectable through the `client`
+and `server` cargo features (both on by default). A crate that only calls gRPC
+can set `default-features = false, features = ["client"]` and never compile the
+server stack — and the matching half of the codegen output (see
+[generating](crate::generating)).
+
 # A worked example
 
 You write a `.proto`:

@@ -61,6 +61,14 @@ matching the package — `package greeter.v1;` becomes `greeter::v1` — so you
 reach the items at `greeter::v1::Greeter` without wrapping anything. Cargo
 re-expands the macro when a referenced `.proto` changes.
 
+To emit only one half, reach for the sibling macros `generate_client!` /
+`generate_server!` (see [Selecting client and server](#selecting-client-and-server)):
+
+```rust,ignore
+trillium_grpc::generate_client!("proto/upstream.proto"); // GreeterClient only
+trillium_grpc::generate_server!("proto/greeter.proto");  // trait + GreeterServer only
+```
+
 # A build script
 
 With the `codegen` feature, [`compile_protos`](crate::codegen::compile_protos)
@@ -87,9 +95,33 @@ mod greeter {
 This is the least transparent option — the output isn't in your tree — so reach
 for it when you're already generating `prost` types from a build script and want
 the gRPC glue to ride along. [`configure`](crate::codegen::configure) exposes the
-one knob, whether to pretty-print the `OUT_DIR` output; for output to a custom
-location or feeding the descriptors to another tool, drop to
+knobs — whether to pretty-print the `OUT_DIR` output, and whether to emit the
+client and/or server halves (see below); for output to a custom location or
+feeding the descriptors to another tool, drop to
 [`generate_from_proto`](crate::codegen::generate_from_proto) and write the files
 yourself.
+
+# Selecting client and server
+
+By default every front-end emits both halves: the service trait +
+`<Service>Server<T>` handler (server) and the `<Service>Client` (client). The
+`prost` message types are always emitted regardless. A pure client or pure
+server can ask for just its half, so the generated module carries no references
+to the other side:
+
+- **Macro:** [`generate!`] emits both; [`generate_client!`](crate::generate_client)
+  and [`generate_server!`](crate::generate_server) emit one half each. This is
+  per-invocation by design — cargo feature unification is global, but one crate
+  can be a server for one service and a client for another, so each call site
+  decides.
+- **Build script / library:** [`Builder::client`](crate::codegen::Builder::client)
+  / [`Builder::server`](crate::codegen::Builder::server) on
+  [`configure`](crate::codegen::configure), or the `client` / `server` fields on
+  [`Options`](crate::codegen::Options).
+
+This pairs with the crate's own `client` / `server` cargo features (both on by
+default): a client-only crate sets `default-features = false, features =
+["client"]`, generates client-only code, and never compiles the server stack (or
+`sync_wrapper`); a server-only crate does the mirror and drops `trillium-client`.
 
 [`generate!`]: crate::generate

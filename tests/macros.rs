@@ -6,6 +6,19 @@
 
 trillium_grpc::generate!("tests/proto/greeter.proto");
 
+// Compile-coverage for the single-side macros. Each lives in its own module so
+// the generated `greeter` tree doesn't collide with the both-sides expansion
+// above. The test binary builds with both features, so client-only output (no
+// trait/Server) and server-only output (no Client) each compile.
+#[allow(dead_code)]
+mod client_only {
+    trillium_grpc::generate_client!("tests/proto/greeter.proto");
+}
+#[allow(dead_code)]
+mod server_only {
+    trillium_grpc::generate_server!("tests/proto/greeter.proto");
+}
+
 use greeter::v1::{Greeter, GreeterClient, GreeterServer, HelloReply, HelloRequest};
 use trillium_grpc::{BidiResponder, Channel, GrpcServerConn, Status, Stream};
 

@@ -15,11 +15,11 @@
 
 use crate::{
     Codec, Encoding, Status,
+    content_type::{has_te_trailers, parse_grpc_content_type},
     frame::writer::encode_frame,
     server::{
         bidi::{BidiResponder, BidiUpgrade},
         body::{CancelSignal, OneShotBody, StreamBody},
-        content_type::{has_te_trailers, parse_grpc_content_type},
         grpc_conn::GrpcServerConn,
     },
     timeout::parse_grpc_timeout,
